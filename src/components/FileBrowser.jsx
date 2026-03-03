@@ -1,0 +1,327 @@
+import { useState, useEffect, useContext, useCallback, useRef } from 'preact/hooks'
+import { WsContext, WorkdirContext } from '../app.jsx'
+
+function sortEntries(entries) {
+  return [...entries].sort((a, b) => {
+    if (a.type !== b.type) return a.type === 'directory' ? -1 : 1
+    return a.name.localeCompare(b.name, undefined, { sensitivity: 'base' })
+  })
+}
+
+function formatSize(bytes) {
+  if (bytes == null) return ''
+  if (bytes < 1024) return `${bytes} B`
+  if (bytes < 1048576) return `${(bytes / 1024).toFixed(1)} KB`
+  return `${(bytes / 1048576).toFixed(1)} MB`
+}
+
+// Shared across all FileBrowser instances — every browser opens where the last one left off
+let _globalLastPath = null
+
+export function FileBrowser({ open, mode, onSelect, onClose }) {
+  const ws = useContext(WsContext)
+  const { workdir } = useContext(WorkdirContext)
+  const root = workdir || '.'
+
+  // columns: [{ path, entries, selected (entry name or null) }]
+  const [columns, setColumns] = useState([])
+  const [error, setError] = useState(null)
+  const [pendingCol, setPendingCol] = useState(null)
+  const scrollRef = useRef(null)
+
+  const browse = useCallback((path, colIndex) => {
+    setError(null)
+    setPendingCol(colIndex)
+    ws.send({ type: 'browse_files', path: path || root, mode: mode || 'file' })
+  }, [ws, mode, root])
+
+  useEffect(() => {
+    if (!open) {
+      // Save deepest path to global memory before clearing
+      setColumns(cols => {
+        if (cols.length > 0) {
+          _globalLastPath = cols[cols.length - 1].path
+        }
+        return []
+      })
+      setError(null)
+      return
+    }
+    const unsub = ws.on('browse_result', (data) => {
+      if (data.error) {
+        setError(data.error)
+        setPendingCol(null)
+        return
+      }
+      setError(null)
+      const sorted = sortEntries(data.entries || [])
+      setPendingCol(prev => {
+        const idx = prev ?? 0
+        setColumns(cols => {
+          const updated = cols.slice(0, idx)
+          updated.push({ path: data.path, entries: sorted, selected: null })
+          return updated
+        })
+        return null
+      })
+    })
+    browse(_globalLastPath || root, 0)
+    return unsub
+  }, [open, ws, browse, root])
+
+  // Auto-scroll to rightmost column
+  useEffect(() => {
+    if (scrollRef.current) {
+      scrollRef.current.scrollLeft = scrollRef.current.scrollWidth
+    }
+  }, [columns.length])
+
+  if (!open) return null
+
+  const handleClick = (colIndex, entry) => {
+    const fullPath = `${columns[colIndex].path}/${entry.name}`
+
+    if (entry.type === 'directory') {
+      // Mark selected in this column, browse into it as next column
+      setColumns(cols => {
+        const updated = cols.slice(0, colIndex + 1)
+        updated[colIndex] = { ...updated[colIndex], selected: entry.name }
+        return updated
+      })
+      browse(fullPath, colIndex + 1)
+    } else {
+      // File: select it if in file mode
+      if (mode !== 'directory') {
+        setColumns(cols => {
+          const updated = cols.slice(0, colIndex + 1)
+          updated[colIndex] = { ...updated[colIndex], selected: entry.name }
+          return updated
+        })
+      }
+    }
+  }
+
+  const handleDoubleClick = (colIndex, entry) => {
+    const fullPath = `${columns[colIndex].path}/${entry.name}`
+    if (mode === 'directory' && entry.type === 'directory') {
+      onSelect(fullPath)
+      onClose()
+    } else if (mode !== 'directory' && entry.type === 'file') {
+      onSelect(fullPath)
+      onClose()
+    }
+  }
+
+  // Determine what's currently selected for the confirm button
+  const lastCol = columns[columns.length - 1]
+  const selectedEntry = lastCol?.selected
+    ? lastCol.entries.find(e => e.name === lastCol.selected)
+    : null
+  const selectedPath = lastCol && lastCol.selected
+    ? `${lastCol.path}/${lastCol.selected}`
+    : null
+
+  const canConfirm = mode === 'directory'
+    ? selectedEntry?.type === 'directory' || columns.length > 0
+    : selectedEntry?.type === 'file'
+
+  const handleConfirm = () => {
+    if (mode === 'directory') {
+      // If a dir is selected, use it; otherwise use the deepest browsed path
+      if (selectedEntry?.type === 'directory') {
+        onSelect(selectedPath)
+      } else if (lastCol) {
+        onSelect(lastCol.path)
+      }
+    } else if (selectedEntry?.type === 'file') {
+      onSelect(selectedPath)
+    }
+    onClose()
+  }
+
+  // Display path relative to workdir
+  const deepestPath = lastCol?.path || root
+  const displayPath = deepestPath.startsWith(root)
+    ? deepestPath.slice(root.length).replace(/^\//, '') || '.'
+    : '.'
+
+  return (
+    <div style={S.backdrop} onClick={onClose}>
+      <div style={S.dialog} onClick={e => e.stopPropagation()}>
+        {/* Title bar */}
+        <div style={S.titleBar}>
+          <span style={S.title}>
+            {mode === 'directory' ? 'Select Directory' : 'Select File'}
+          </span>
+          <span style={S.pathText}>{displayPath}</span>
+          <button style={S.closeBtn} onClick={onClose}>&times;</button>
+        </div>
+
+        {error && <div style={S.error}>{error}</div>}
+
+        {/* Column view */}
+        <div style={S.columnsOuter} ref={scrollRef}>
+          {columns.map((col, ci) => (
+            <div key={ci} style={S.column}>
+              {col.entries.length === 0 && (
+                <div style={S.empty}>Empty</div>
+              )}
+              {col.entries.map(entry => {
+                const isSelected = col.selected === entry.name
+                const isDir = entry.type === 'directory'
+                return (
+                  <div
+                    key={entry.name}
+                    style={{
+                      ...S.row,
+                      background: isSelected ? 'var(--accent)' : undefined,
+                      color: isSelected ? '#fff' : undefined,
+                    }}
+                    onClick={() => handleClick(ci, entry)}
+                    onDblClick={() => handleDoubleClick(ci, entry)}
+                    onMouseEnter={e => { if (!isSelected) e.currentTarget.style.background = 'var(--bg-hover)' }}
+                    onMouseLeave={e => { if (!isSelected) e.currentTarget.style.background = 'transparent' }}
+                  >
+                    <span style={{ ...S.name, fontWeight: isDir ? 500 : 400 }}>
+                      {entry.name}
+                    </span>
+                    {isDir ? (
+                      <span style={{ ...S.chevron, color: isSelected ? '#fff' : undefined }}>&#9656;</span>
+                    ) : (
+                      <span style={{ ...S.size, color: isSelected ? 'rgba(255,255,255,0.7)' : undefined }}>
+                        {formatSize(entry.size)}
+                      </span>
+                    )}
+                  </div>
+                )
+              })}
+            </div>
+          ))}
+        </div>
+
+        {/* Footer */}
+        <div style={S.footer}>
+          <button class="btn-secondary" onClick={onClose}>Cancel</button>
+          <button class="btn-primary" onClick={handleConfirm} disabled={!canConfirm}>
+            Select
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+const S = {
+  backdrop: {
+    position: 'fixed',
+    inset: 0,
+    background: 'rgba(0,0,0,0.25)',
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    zIndex: 1000,
+  },
+  dialog: {
+    background: 'var(--bg-surface)',
+    border: '1px solid var(--border)',
+    borderRadius: 'var(--radius-lg)',
+    width: '80vw',
+    maxWidth: '80vw',
+    minHeight: '50vh',
+    maxHeight: '80vh',
+    display: 'flex',
+    flexDirection: 'column',
+    boxShadow: '0 8px 30px rgba(0,0,0,0.12)',
+  },
+  titleBar: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: '12px',
+    padding: '10px 16px',
+    borderBottom: '1px solid var(--border)',
+  },
+  title: {
+    fontSize: '14px',
+    fontWeight: 600,
+    color: 'var(--text-primary)',
+    flexShrink: 0,
+  },
+  pathText: {
+    flex: 1,
+    fontSize: '12px',
+    fontFamily: 'ui-monospace, "SF Mono", Menlo, Monaco, monospace',
+    color: 'var(--text-muted)',
+    overflow: 'hidden',
+    textOverflow: 'ellipsis',
+    whiteSpace: 'nowrap',
+    textAlign: 'right',
+  },
+  closeBtn: {
+    background: 'none',
+    border: 'none',
+    fontSize: '18px',
+    color: 'var(--text-muted)',
+    cursor: 'pointer',
+    padding: '0 4px',
+    lineHeight: 1,
+    flexShrink: 0,
+  },
+  error: {
+    padding: '8px 16px',
+    fontSize: '12px',
+    color: 'var(--error)',
+  },
+  columnsOuter: {
+    display: 'flex',
+    flex: 1,
+    overflowX: 'auto',
+    overflowY: 'hidden',
+    minHeight: 0,
+  },
+  column: {
+    minWidth: '260px',
+    maxWidth: '340px',
+    flex: '0 0 auto',
+    overflowY: 'auto',
+    borderRight: '1px solid var(--border)',
+  },
+  empty: {
+    padding: '20px',
+    textAlign: 'center',
+    color: 'var(--text-muted)',
+    fontSize: '12px',
+  },
+  row: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: '4px',
+    padding: '5px 10px',
+    cursor: 'pointer',
+    transition: 'background 0.06s',
+  },
+  name: {
+    flex: 1,
+    fontSize: '12px',
+    color: 'inherit',
+    overflow: 'hidden',
+    textOverflow: 'ellipsis',
+    whiteSpace: 'nowrap',
+  },
+  chevron: {
+    fontSize: '10px',
+    color: 'var(--text-muted)',
+    flexShrink: 0,
+  },
+  size: {
+    fontSize: '10px',
+    color: 'var(--text-muted)',
+    flexShrink: 0,
+  },
+  footer: {
+    padding: '10px 16px',
+    borderTop: '1px solid var(--border)',
+    display: 'flex',
+    justifyContent: 'flex-end',
+    gap: '8px',
+  },
+}

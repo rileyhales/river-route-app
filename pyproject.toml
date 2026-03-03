@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "river-route-app"
+version = "2.0.0"
+description = "Browser-based app for river-route simulations"
+readme = "README.md"
+license = "BSD-3-Clause"
+requires-python = ">=3.12"
+authors = [
+    { name = "Riley Hales PhD" },
+]
+dependencies = [
+    "river-route~=2.0.0",
+    "starlette>=0.40",
+    "uvicorn[standard]>=0.30",
+]
+
+[tool.setuptools.packages.find]
+include = ["river_route_app*"]
+
+[tool.setuptools.package-data]
+river_route_app = ["static/**"]

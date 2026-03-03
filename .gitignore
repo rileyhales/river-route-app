@@ -1,0 +1,14 @@
+# Logs
+logs
+*.log
+
+node_modules
+dist
+dist-ssr
+*.local
+
+.idea
+.DS_Store
+
+*.egg-into/
+river_route_app/static/*
