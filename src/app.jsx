@@ -1,9 +1,9 @@
 import { createContext } from 'preact'
-import { useState, useEffect, useCallback } from 'preact/hooks'
+import { useState, useEffect, useCallback, useRef } from 'preact/hooks'
 import { useWebSocket } from './hooks/useWebSocket.js'
 import { TopBar } from './components/TopBar.jsx'
 import { ConfigPage } from './pages/ConfigPage.jsx'
-import { CodePreview } from './components/CodePreview.jsx'
+import { CodePreview, resolveDischargeDir } from './components/CodePreview.jsx'
 import { RunControls, RunLogs } from './pages/RunPage.jsx'
 import { ResultsBrowser, ResultsChart } from './pages/ResultsPage.jsx'
 import './style/global.css'
@@ -18,8 +18,8 @@ export function App() {
   const [config, setConfig] = useState(() => {
     try {
       const saved = localStorage.getItem('rr_config')
-      return saved ? JSON.parse(saved) : { router: 'Muskingum' }
-    } catch { return { router: 'Muskingum' } }
+      return saved ? JSON.parse(saved) : { _router: 'Muskingum' }
+    } catch { return { _router: 'Muskingum' } }
   })
 
   // Persist config to localStorage on every change
@@ -44,6 +44,8 @@ export function App() {
   const [runLogs, setRunLogs] = useState([])
   const [runResult, setRunResult] = useState(null)
   const [runErrors, setRunErrors] = useState([])
+  const [startedAt, setStartedAt] = useState(null)
+  const [finishedAt, setFinishedAt] = useState(null)
 
   // Subscribe to simulation WebSocket events
   useEffect(() => {
@@ -51,6 +53,8 @@ export function App() {
       ws.on('sim_started', () => {
         setRunStatus('running')
         setRunPercent(0)
+        setStartedAt(new Date())
+        setFinishedAt(null)
       }),
       ws.on('sim_progress', (data) => {
         setRunPercent(data.percent)
@@ -62,16 +66,19 @@ export function App() {
         setRunStatus('complete')
         setRunPercent(100)
         setRunResult(data)
+        setFinishedAt(new Date())
       }),
       ws.on('sim_error', (data) => {
         setRunStatus('error')
         setRunErrors([data.error])
+        setFinishedAt(new Date())
         if (data.traceback) {
           setRunLogs(prev => [...prev, { level: 'ERROR', message: data.traceback }])
         }
       }),
       ws.on('sim_cancelled', () => {
         setRunStatus('cancelled')
+        setFinishedAt(new Date())
       }),
       // Restore state from server snapshot on reconnect
       ws.on('sim_status', (data) => {
@@ -101,24 +108,27 @@ export function App() {
     return () => unsubs.forEach(fn => fn())
   }, [ws])
 
-  // Auto-navigate to Run page when simulation starts
+  // Auto-navigate on status transitions (not on restored state from server snapshot)
+  const prevRunStatus = useRef(runStatus)
   useEffect(() => {
-    if (runStatus === 'running') setPage('run')
-  }, [runStatus])
-
-  // Auto-navigate to Results page when simulation completes
-  useEffect(() => {
-    if (runStatus === 'complete') setPage('results')
+    const prev = prevRunStatus.current
+    prevRunStatus.current = runStatus
+    // Only navigate if this is a real transition, not initial/restored state
+    if (prev === 'idle' && runStatus !== 'idle') return // skip snapshot restores
+    if (runStatus === 'running' && prev === 'validating') setPage('run')
+    if (runStatus === 'complete' && prev === 'running') setPage('results')
   }, [runStatus])
 
   const run = useCallback(() => {
     setRunStatus('validating')
+    setStartedAt(new Date())
+    setFinishedAt(null)
     setRunLogs([])
     setRunPercent(0)
     setRunResult(null)
     setRunErrors([])
 
-    const { router, ...cfgFields } = config
+    const { _router: router, ...cfgFields } = resolveDischargeDir(config)
     ws.send({ type: 'validate_config', config: cfgFields })
     const unsub = ws.on('validation_result', (data) => {
       unsub()
@@ -136,22 +146,45 @@ export function App() {
     ws.send({ type: 'cancel_simulation' })
   }, [ws])
 
+  const clearRunState = useCallback(() => {
+    if (runStatus === 'running' || runStatus === 'validating') {
+      ws.send({ type: 'cancel_simulation' })
+    }
+    setRunStatus('idle')
+    setRunPercent(0)
+    setRunLogs([])
+    setRunResult(null)
+    setRunErrors([])
+    setStartedAt(null)
+    setFinishedAt(null)
+  }, [ws, runStatus])
+
+  const resetAll = useCallback(() => {
+    clearRunState()
+    setConfig({ _router: 'Muskingum' })
+    try { localStorage.removeItem('rr_config') } catch {}
+    setPage('config')
+  }, [clearRunState])
+
   const runCtx = {
     status: runStatus,
     percent: runPercent,
     logs: runLogs,
     result: runResult,
     errors: runErrors,
+    startedAt,
+    finishedAt,
     run,
     cancel,
+    clearRunState,
   }
 
   return (
     <WsContext.Provider value={ws}>
-      <ConfigContext.Provider value={{ config, setConfig, resetConfig: () => { setConfig({ router: 'Muskingum' }); try { localStorage.removeItem('rr_config') } catch {} } }}>
+      <ConfigContext.Provider value={{ config, setConfig }}>
         <WorkdirContext.Provider value={{ workdir, setWorkdir }}>
           <RunContext.Provider value={runCtx}>
-            <TopBar connected={ws.connected} activePage={page} onNavigate={setPage} />
+            <TopBar connected={ws.connected} activePage={page} onNavigate={setPage} resetAll={resetAll} />
             <div style={styles.main}>
               <div style={styles.left}>
                 {page === 'config' && <ConfigPage onNavigate={setPage} />}

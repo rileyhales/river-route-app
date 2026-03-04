@@ -2,7 +2,8 @@ import os
 
 
 def browse_directory(path: str, mode: str = 'file') -> dict:
-    path = os.path.abspath(path or os.getcwd())
+    path = os.path.expanduser(path or '~')
+    path = os.path.abspath(path)
 
     if not os.path.isdir(path):
         return {
@@ -13,6 +14,11 @@ def browse_directory(path: str, mode: str = 'file') -> dict:
         }
 
     entries = []
+    # Always offer parent navigation (unless at filesystem root)
+    parent = os.path.dirname(path)
+    if parent != path:
+        entries.append({'name': '..', 'type': 'directory', 'size': None})
+
     try:
         for name in sorted(os.listdir(path)):
             if name.startswith('.'):

@@ -10,5 +10,5 @@ dist-ssr
 .idea
 .DS_Store
 
-*.egg-into/
+*.egg-info/
 river_route_app/static/*

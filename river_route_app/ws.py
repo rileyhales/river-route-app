@@ -17,7 +17,7 @@ async def handle_ws_message(websocket: WebSocket, data: dict) -> None:
 
     try:
         if msg_type == 'browse_files':
-            path = data.get('path', '') or _workdir
+            path = os.path.expanduser(data.get('path', '') or '~')
             result = browse_directory(path, data.get('mode', 'file'))
             await websocket.send_json(result)
 
@@ -63,9 +63,12 @@ async def handle_ws_message(websocket: WebSocket, data: dict) -> None:
             )
             if 'source' in data:
                 result['source'] = data['source']
+            if 'label' in data:
+                result['label'] = data['label']
+            if 'files' not in result:
+                result['files'] = files
             if directory:
                 result['directory'] = directory
-                result['files'] = files
             await websocket.send_json(result)
 
         elif msg_type == 'set_workdir':
@@ -78,6 +81,9 @@ async def handle_ws_message(websocket: WebSocket, data: dict) -> None:
 
         elif msg_type == 'get_workdir':
             await websocket.send_json({'type': 'workdir_set', 'path': _workdir})
+
+        elif msg_type == 'get_homedir':
+            await websocket.send_json({'type': 'homedir', 'path': os.path.expanduser('~')})
 
         else:
             await websocket.send_json({'type': 'error', 'error': f'Unknown message type: {msg_type}'})

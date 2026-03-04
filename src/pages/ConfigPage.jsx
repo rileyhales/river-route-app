@@ -1,19 +1,20 @@
 import { useState, useContext, useCallback } from 'preact/hooks'
 import { WsContext, ConfigContext, RunContext } from '../app.jsx'
+import { resolveDischargeDir } from '../components/CodePreview.jsx'
 import { RouterForm, VALID_KEYS } from '../components/RouterForm.jsx'
 
 const ROUTERS = ['Muskingum', 'RapidMuskingum', 'UnitMuskingum']
 
 export function ConfigPage({ onNavigate }) {
   const ws = useContext(WsContext)
-  const { config, setConfig, resetConfig } = useContext(ConfigContext)
+  const { config, setConfig } = useContext(ConfigContext)
   const run = useContext(RunContext)
   const [validation, setValidation] = useState(null)
   const [validating, setValidating] = useState(false)
 
   const isRunning = run.status === 'running' || run.status === 'validating'
 
-  const router = config.router || 'Muskingum'
+  const router = config._router || 'Muskingum'
 
   const updateField = useCallback((key, value) => {
     setConfig(prev => ({ ...prev, [key]: value }))
@@ -25,9 +26,9 @@ export function ConfigPage({ onNavigate }) {
     setConfig(prev => {
       const next = {}
       for (const key of Object.keys(prev)) {
-        if (key !== 'router' && valid.has(key)) next[key] = prev[key]
+        if (key !== '_router' && valid.has(key)) next[key] = prev[key]
       }
-      next.router = r
+      next._router = r
       return next
     })
     setValidation(null)
@@ -36,7 +37,7 @@ export function ConfigPage({ onNavigate }) {
   const validate = useCallback(() => {
     setValidating(true)
     setValidation(null)
-    const { router: _r, ...cfgFields } = config
+    const { _router, ...cfgFields } = config
 
     const cleanup = () => { unsubResult(); unsubError(); clearTimeout(timer) }
 
@@ -60,7 +61,8 @@ export function ConfigPage({ onNavigate }) {
   }, [ws, config])
 
   const saveConfig = useCallback(() => {
-    const blob = new Blob([JSON.stringify(config, null, 2)], { type: 'application/json' })
+    const resolved = resolveDischargeDir(config)
+    const blob = new Blob([JSON.stringify(resolved, null, 2)], { type: 'application/json' })
     const url = URL.createObjectURL(blob)
     const a = document.createElement('a')
     a.href = url
@@ -69,7 +71,14 @@ export function ConfigPage({ onNavigate }) {
     URL.revokeObjectURL(url)
   }, [config])
 
+  const hasRunData = run.status !== 'idle' || run.logs.length > 0 || run.result
+
   const loadConfig = useCallback(() => {
+    if (isRunning) {
+      if (!confirm('A simulation is currently running. Loading a new config will cancel it and clear all results. Continue?')) return
+    } else if (hasRunData) {
+      if (!confirm('Loading a new config will clear run logs and results. Continue?')) return
+    }
     const input = document.createElement('input')
     input.type = 'file'
     input.accept = '.json'
@@ -80,6 +89,7 @@ export function ConfigPage({ onNavigate }) {
       reader.onload = (ev) => {
         try {
           const loaded = JSON.parse(ev.target.result)
+          run.clearRunState()
           setConfig(loaded)
           setValidation(null)
         } catch {
@@ -89,7 +99,7 @@ export function ConfigPage({ onNavigate }) {
       reader.readAsText(file)
     }
     input.click()
-  }, [setConfig])
+  }, [setConfig, isRunning, hasRunData, run])
 
   return (
     <div class="page">
@@ -99,7 +109,6 @@ export function ConfigPage({ onNavigate }) {
           <p class="page-subtitle">Configure your river routing simulation</p>
         </div>
         <div class="flex gap-8">
-          <button class="btn-secondary" onClick={() => { resetConfig(); setValidation(null) }} disabled={isRunning}>Reset</button>
           <button class="btn-secondary" onClick={loadConfig} disabled={isRunning}>Load JSON</button>
           <button class="btn-secondary" onClick={saveConfig}>Save JSON</button>
           <button class="btn-secondary" onClick={validate} disabled={validating || isRunning}>

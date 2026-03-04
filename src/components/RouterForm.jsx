@@ -61,7 +61,7 @@ const ADVANCED_FIELDS = [
  */
 export const VALID_KEYS = {
   Muskingum: new Set([
-    'router',
+    '_router',
     // core + state + output
     'params_file', 'channel_state_init_file', 'channel_state_final_file',
     'discharge_dir', 'discharge_files',
@@ -71,7 +71,7 @@ export const VALID_KEYS = {
     'var_river_id', 'var_discharge', 'log_level',
   ]),
   RapidMuskingum: new Set([
-    'router',
+    '_router',
     // core + state + output
     'params_file', 'channel_state_init_file', 'channel_state_final_file',
     'discharge_dir', 'discharge_files',
@@ -86,7 +86,7 @@ export const VALID_KEYS = {
     'var_catchment_runoff_variable', 'var_runoff_depth', 'log_level',
   ]),
   UnitMuskingum: new Set([
-    'router',
+    '_router',
     // core + state + output
     'params_file', 'channel_state_init_file', 'channel_state_final_file',
     'discharge_dir', 'discharge_files',

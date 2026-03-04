@@ -8,21 +8,31 @@ import { parseCSV } from '../utils/parseCSV.js'
 /** Compute cumulative discharged volume from uniform-timestep data */
 function formatVolume(times, discharge) {
   if (!times || times.length < 2 || !discharge) return '—'
-  // Compute dt from first two timestamps (seconds)
   const t0 = new Date(times[0]).getTime() / 1000
   const t1 = new Date(times[1]).getTime() / 1000
   const dt = Math.abs(t1 - t0)
   if (dt === 0) return '—'
-  // Volume = sum(Q * dt) in m³
   let volume = 0
   for (let i = 0; i < discharge.length; i++) {
     volume += (discharge[i] || 0) * dt
   }
-  // Format with appropriate units
   if (volume >= 1e9) return `${(volume / 1e9).toFixed(2)} km³`
   if (volume >= 1e6) return `${(volume / 1e6).toFixed(2)} Mm³`
   if (volume >= 1e3) return `${(volume / 1e3).toFixed(1)} thousand m³`
   return `${volume.toFixed(1)} m³`
+}
+
+/** Compute min, max, mean from a discharge array */
+function computeStats(discharge) {
+  if (!discharge || discharge.length === 0) return null
+  let min = Infinity, max = -Infinity, sum = 0
+  for (let i = 0; i < discharge.length; i++) {
+    const v = discharge[i] || 0
+    if (v < min) min = v
+    if (v > max) max = v
+    sum += v
+  }
+  return { min, max, mean: sum / discharge.length }
 }
 
 /** Get output files: prefer run result, fall back to resolved config paths */
@@ -44,7 +54,14 @@ export function ResultsBrowser() {
   const { config } = useContext(ConfigContext)
   const files = useOutputFiles()
 
-  const [riverId, setRiverId] = useState('')
+  const [riverId, setRiverId] = useState(() => {
+    try { return sessionStorage.getItem('rr_river_id') || '' } catch { return '' }
+  })
+  const defaultPrimaryLabel = () => {
+    const dir = config.discharge_dir || ''
+    return dir.split('/').filter(Boolean).pop() || 'Primary'
+  }
+  const [primaryLabel, setPrimaryLabel] = useState(defaultPrimaryLabel)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState(null)
   const [compDatasets, setCompDatasets] = useState([]) // [{ directory, files }]
@@ -52,6 +69,11 @@ export function ResultsBrowser() {
   const [compDirLoading, setCompDirLoading] = useState(false)
   const [fileBrowserOpen, setFileBrowserOpen] = useState(false)
   const scanCallbackRef = useRef(null)
+
+  // Persist river_id to sessionStorage
+  useEffect(() => {
+    try { sessionStorage.setItem('rr_river_id', riverId) } catch {}
+  }, [riverId])
 
   // Listen for result_data errors on this side too (ignore comparison responses)
   useEffect(() => {
@@ -100,9 +122,11 @@ export function ResultsBrowser() {
       }
       setError(null)
       const absDir = data.path
+      // Default label from last directory name
+      const defaultLabel = absDir.split('/').filter(Boolean).pop() || 'Comparison'
       setCompDatasets(prev => {
         if (prev.some(d => d.directory === absDir)) return prev
-        return [...prev, { directory: absDir, files: ncFiles }]
+        return [...prev, { directory: absDir, files: ncFiles, label: defaultLabel }]
       })
     })
 
@@ -130,6 +154,7 @@ export function ResultsBrowser() {
       var_river_id: config.var_river_id || undefined,
       var_discharge: config.var_discharge || undefined,
       source: 'primary',
+      label: primaryLabel,
     })
 
     // Send comparison requests — each dataset's files opened as mfdataset
@@ -141,9 +166,10 @@ export function ResultsBrowser() {
         var_river_id: config.var_river_id || undefined,
         var_discharge: config.var_discharge || undefined,
         source: 'comparison',
+        label: dataset.label,
       })
     })
-  }, [ws, files, riverId, config, compDatasets])
+  }, [ws, files, riverId, config, primaryLabel, compDatasets])
 
   const handleAddDir = useCallback(() => {
     const dirPath = compDirInput.trim()
@@ -158,6 +184,10 @@ export function ResultsBrowser() {
 
   const removeCompDataset = (directory) => {
     setCompDatasets(prev => prev.filter(d => d.directory !== directory))
+  }
+
+  const renameCompDataset = (directory, label) => {
+    setCompDatasets(prev => prev.map(d => d.directory === directory ? { ...d, label } : d))
   }
 
   return (
@@ -198,6 +228,16 @@ export function ResultsBrowser() {
               <div key={i} style={styles.filePath}>{f}</div>
             ))}
           </div>
+          <div style={{ marginTop: '8px' }}>
+            <label style={styles.inputLabel}>Dataset Label</label>
+            <input
+              type="text"
+              value={primaryLabel}
+              onInput={(e) => setPrimaryLabel(e.target.value)}
+              style={styles.labelInput}
+              placeholder="Primary"
+            />
+          </div>
         </div>
       ) : (
         <div style={styles.noFiles}>
@@ -214,7 +254,13 @@ export function ResultsBrowser() {
           {compDatasets.map((dataset) => (
             <div key={dataset.directory} style={{ marginBottom: '12px' }}>
               <div style={styles.compFileRow}>
-                <div style={styles.filePath}>{dataset.directory}</div>
+                <input
+                  type="text"
+                  value={dataset.label}
+                  onInput={(e) => renameCompDataset(dataset.directory, e.target.value)}
+                  style={styles.labelInput}
+                  placeholder="Dataset name"
+                />
                 <button
                   class="btn-secondary"
                   style={styles.removeBtn}
@@ -223,6 +269,7 @@ export function ResultsBrowser() {
                   X
                 </button>
               </div>
+              <div style={styles.compDirPath}>{dataset.directory}</div>
               <div style={styles.fileList}>
                 {dataset.files.map((f, i) => (
                   <div key={i} style={styles.filePath}>{f}</div>
@@ -288,23 +335,23 @@ export function ResultsChart() {
       }
 
       if (data.source === 'comparison') {
-        // Route comparison data to overlays — label with directory or first file name
-        const fileName = (data.files?.[0] || '').split('/').slice(-2, -1)[0]
+        // Use user-provided label, fall back to directory name from file path
+        const fallbackLabel = (data.files?.[0] || '').split('/').slice(-2, -1)[0]
           || (data.files?.[0] || '').split('/').pop()
           || 'Comparison'
         const OVERLAY_COLORS = ['#f97316', '#a855f7', '#14b8a6', '#ef4444', '#eab308']
         setOverlays(prev => {
           const color = OVERLAY_COLORS[prev.length % OVERLAY_COLORS.length]
           return [...prev, {
-            label: fileName,
+            label: data.label || fallbackLabel,
             times: data.times,
             discharge: data.discharge,
             color,
           }]
         })
       } else {
-        // Primary data — clear overlays
-        setResultData(data)
+        // Primary data — clear overlays, store label
+        setResultData({ ...data, label: data.label || 'Primary' })
         setOverlays([])
       }
     })
@@ -432,28 +479,73 @@ export function ResultsChart() {
 
       {csvControls}
 
-      <div style={styles.statRow}>
-        <div style={styles.stat}>
-          <div style={styles.statValue}>{resultData.stats.min.toFixed(2)}</div>
-          <div style={styles.statLabel}>Min Q (m3/s)</div>
+      {/* Primary stats */}
+      {resultData && (
+        <div style={styles.statsBlock}>
+          <div style={styles.statsBlockLabel}>
+            <span style={{ ...styles.colorSwatch, background: '#6366f1' }} />
+            {resultData.label}
+          </div>
+          <div style={styles.statRow}>
+            <div style={styles.stat}>
+              <div style={styles.statValue}>{resultData.stats.min.toFixed(2)}</div>
+              <div style={styles.statLabel}>Min Q (m³/s)</div>
+            </div>
+            <div style={styles.stat}>
+              <div style={styles.statValue}>{resultData.stats.max.toFixed(2)}</div>
+              <div style={styles.statLabel}>Max Q (m³/s)</div>
+            </div>
+            <div style={styles.stat}>
+              <div style={styles.statValue}>{resultData.stats.mean.toFixed(2)}</div>
+              <div style={styles.statLabel}>Mean Q (m³/s)</div>
+            </div>
+            <div style={styles.stat}>
+              <div style={styles.statValue}>{resultData.times.length}</div>
+              <div style={styles.statLabel}>Timesteps</div>
+            </div>
+            <div style={styles.stat}>
+              <div style={styles.statValue}>{formatVolume(resultData.times, resultData.discharge)}</div>
+              <div style={styles.statLabel}>Cumulative Volume</div>
+            </div>
+          </div>
         </div>
-        <div style={styles.stat}>
-          <div style={styles.statValue}>{resultData.stats.max.toFixed(2)}</div>
-          <div style={styles.statLabel}>Max Q (m3/s)</div>
-        </div>
-        <div style={styles.stat}>
-          <div style={styles.statValue}>{resultData.stats.mean.toFixed(2)}</div>
-          <div style={styles.statLabel}>Mean Q (m3/s)</div>
-        </div>
-        <div style={styles.stat}>
-          <div style={styles.statValue}>{resultData.times.length}</div>
-          <div style={styles.statLabel}>Timesteps</div>
-        </div>
-        <div style={styles.stat}>
-          <div style={styles.statValue}>{formatVolume(resultData.times, resultData.discharge)}</div>
-          <div style={styles.statLabel}>Cumulative Volume</div>
-        </div>
-      </div>
+      )}
+
+      {/* Comparison overlay stats */}
+      {overlays.map((overlay, i) => {
+        const s = computeStats(overlay.discharge)
+        if (!s) return null
+        return (
+          <div key={i} style={styles.statsBlock}>
+            <div style={styles.statsBlockLabel}>
+              <span style={{ ...styles.colorSwatch, background: overlay.color }} />
+              {overlay.label}
+            </div>
+            <div style={styles.statRow}>
+              <div style={styles.stat}>
+                <div style={styles.statValue}>{s.min.toFixed(2)}</div>
+                <div style={styles.statLabel}>Min Q (m³/s)</div>
+              </div>
+              <div style={styles.stat}>
+                <div style={styles.statValue}>{s.max.toFixed(2)}</div>
+                <div style={styles.statLabel}>Max Q (m³/s)</div>
+              </div>
+              <div style={styles.stat}>
+                <div style={styles.statValue}>{s.mean.toFixed(2)}</div>
+                <div style={styles.statLabel}>Mean Q (m³/s)</div>
+              </div>
+              <div style={styles.stat}>
+                <div style={styles.statValue}>{overlay.times?.length ?? '—'}</div>
+                <div style={styles.statLabel}>Timesteps</div>
+              </div>
+              <div style={styles.stat}>
+                <div style={styles.statValue}>{formatVolume(overlay.times, overlay.discharge)}</div>
+                <div style={styles.statLabel}>Cumulative Volume</div>
+              </div>
+            </div>
+          </div>
+        )
+      })}
     </div>
   )
 }
@@ -526,6 +618,23 @@ const styles = {
     alignItems: 'center',
     gap: '6px',
     marginBottom: '4px',
+  },
+  labelInput: {
+    flex: 1,
+    fontSize: '14px',
+    fontWeight: '600',
+    padding: '4px 8px',
+    border: '1px solid var(--border)',
+    borderRadius: '4px',
+    background: 'var(--bg-elevated)',
+    color: 'var(--text-primary)',
+  },
+  compDirPath: {
+    fontSize: '11px',
+    fontFamily: 'ui-monospace, "SF Mono", Menlo, Monaco, monospace',
+    color: 'var(--text-muted)',
+    padding: '0 8px 4px',
+    wordBreak: 'break-all',
   },
   removeBtn: {
     fontSize: '11px',
@@ -600,10 +709,22 @@ const styles = {
   overlayLabel: {
     color: 'var(--text-secondary)',
   },
+  statsBlock: {
+    marginTop: '16px',
+    flexShrink: 0,
+  },
+  statsBlockLabel: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: '8px',
+    fontSize: '13px',
+    fontWeight: '600',
+    color: 'var(--text-secondary)',
+    marginBottom: '6px',
+  },
   statRow: {
     display: 'flex',
     gap: '10px',
-    marginTop: '16px',
     flexShrink: 0,
   },
   stat: {

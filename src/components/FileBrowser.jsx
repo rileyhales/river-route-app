@@ -3,6 +3,9 @@ import { WsContext, WorkdirContext } from '../app.jsx'
 
 function sortEntries(entries) {
   return [...entries].sort((a, b) => {
+    // '..' always first
+    if (a.name === '..') return -1
+    if (b.name === '..') return 1
     if (a.type !== b.type) return a.type === 'directory' ? -1 : 1
     return a.name.localeCompare(b.name, undefined, { sensitivity: 'base' })
   })
@@ -15,19 +18,18 @@ function formatSize(bytes) {
   return `${(bytes / 1048576).toFixed(1)} MB`
 }
 
-// Shared across all FileBrowser instances — every browser opens where the last one left off
-let _globalLastPath = null
-
-export function FileBrowser({ open, mode, onSelect, onClose }) {
+export function FileBrowser({ open, mode, initialPath, onSelect, onClose }) {
   const ws = useContext(WsContext)
   const { workdir } = useContext(WorkdirContext)
-  const root = workdir || '.'
+  const root = initialPath || workdir || '~'
 
   // columns: [{ path, entries, selected (entry name or null) }]
   const [columns, setColumns] = useState([])
   const [error, setError] = useState(null)
   const [pendingCol, setPendingCol] = useState(null)
   const scrollRef = useRef(null)
+  const columnsRef = useRef(columns)
+  columnsRef.current = columns
 
   const browse = useCallback((path, colIndex) => {
     setError(null)
@@ -36,17 +38,8 @@ export function FileBrowser({ open, mode, onSelect, onClose }) {
   }, [ws, mode, root])
 
   useEffect(() => {
-    if (!open) {
-      // Save deepest path to global memory before clearing
-      setColumns(cols => {
-        if (cols.length > 0) {
-          _globalLastPath = cols[cols.length - 1].path
-        }
-        return []
-      })
-      setError(null)
-      return
-    }
+    if (!open) return
+
     const unsub = ws.on('browse_result', (data) => {
       if (data.error) {
         setError(data.error)
@@ -65,7 +58,12 @@ export function FileBrowser({ open, mode, onSelect, onClose }) {
         return null
       })
     })
-    browse(_globalLastPath || root, 0)
+
+    // Only browse from root on first open — columns persist across close/reopen
+    if (columnsRef.current.length === 0) {
+      browse(root, 0)
+    }
+
     return unsub
   }, [open, ws, browse, root])
 
@@ -79,6 +77,12 @@ export function FileBrowser({ open, mode, onSelect, onClose }) {
   if (!open) return null
 
   const handleClick = (colIndex, entry) => {
+    if (entry.name === '..') {
+      // Navigate to parent: replace this column and remove any to the right
+      const parentPath = columns[colIndex].path.replace(/\/[^/]+$/, '') || '/'
+      browse(parentPath, colIndex)
+      return
+    }
     const fullPath = `${columns[colIndex].path}/${entry.name}`
 
     if (entry.type === 'directory') {
@@ -102,6 +106,10 @@ export function FileBrowser({ open, mode, onSelect, onClose }) {
   }
 
   const handleDoubleClick = (colIndex, entry) => {
+    if (entry.name === '..') {
+      handleClick(colIndex, entry)
+      return
+    }
     const fullPath = `${columns[colIndex].path}/${entry.name}`
     if (mode === 'directory' && entry.type === 'directory') {
       onSelect(fullPath)
@@ -139,11 +147,24 @@ export function FileBrowser({ open, mode, onSelect, onClose }) {
     onClose()
   }
 
-  // Display path relative to workdir
+  // Display path — show the absolute path for the deepest column
   const deepestPath = lastCol?.path || root
-  const displayPath = deepestPath.startsWith(root)
-    ? deepestPath.slice(root.length).replace(/^\//, '') || '.'
-    : '.'
+  const [pathInput, setPathInput] = useState('')
+  const [editingPath, setEditingPath] = useState(false)
+
+  // Sync pathInput when deepestPath changes
+  useEffect(() => {
+    if (!editingPath) setPathInput(deepestPath)
+  }, [deepestPath, editingPath])
+
+  const handlePathSubmit = (e) => {
+    e.preventDefault()
+    const trimmed = pathInput.trim()
+    if (trimmed) {
+      browse(trimmed, 0)
+    }
+    setEditingPath(false)
+  }
 
   return (
     <div style={S.backdrop} onClick={onClose}>
@@ -153,7 +174,17 @@ export function FileBrowser({ open, mode, onSelect, onClose }) {
           <span style={S.title}>
             {mode === 'directory' ? 'Select Directory' : 'Select File'}
           </span>
-          <span style={S.pathText}>{displayPath}</span>
+          <form onSubmit={handlePathSubmit} style={{ flex: 1, display: 'flex' }}>
+            <input
+              type="text"
+              value={pathInput}
+              onInput={e => { setPathInput(e.target.value); setEditingPath(true) }}
+              onBlur={() => { setEditingPath(false); setPathInput(deepestPath) }}
+              onKeyDown={e => { if (e.key === 'Escape') { setEditingPath(false); setPathInput(deepestPath); e.target.blur() } }}
+              style={S.pathInput}
+              spellcheck={false}
+            />
+          </form>
           <button style={S.closeBtn} onClick={onClose}>&times;</button>
         </div>
 
@@ -246,15 +277,17 @@ const S = {
     color: 'var(--text-primary)',
     flexShrink: 0,
   },
-  pathText: {
+  pathInput: {
     flex: 1,
     fontSize: '12px',
     fontFamily: 'ui-monospace, "SF Mono", Menlo, Monaco, monospace',
-    color: 'var(--text-muted)',
-    overflow: 'hidden',
-    textOverflow: 'ellipsis',
-    whiteSpace: 'nowrap',
-    textAlign: 'right',
+    color: 'var(--text-primary)',
+    background: 'var(--bg-elevated)',
+    border: '1px solid var(--border)',
+    borderRadius: '4px',
+    padding: '3px 8px',
+    outline: 'none',
+    width: '100%',
   },
   closeBtn: {
     background: 'none',

@@ -94,12 +94,18 @@ class WebSocketLogHandler(logging.Handler):
         self._queue.put(('log', record.levelname, self.format(record)))
 
 
+class SimulationCancelled(Exception):
+    """Raised inside the simulation thread when the user cancels."""
+    pass
+
+
 class StreamingTqdm:
     """Iterator wrapper that emits progress updates to a queue, mimicking tqdm."""
 
-    def __init__(self, iterable, msg_queue: queue.Queue, desc: str = '', **kwargs):
+    def __init__(self, iterable, msg_queue: queue.Queue, cancelled: threading.Event, desc: str = '', **kwargs):
         self._iterable = iterable
         self._queue = msg_queue
+        self._cancelled = cancelled
         self._desc = desc
         self._total = len(iterable) if hasattr(iterable, '__len__') else kwargs.get('total', 0)
         self._n = 0
@@ -107,6 +113,8 @@ class StreamingTqdm:
 
     def __iter__(self):
         for item in self._iterable:
+            if self._cancelled.is_set():
+                raise SimulationCancelled()
             yield item
             self._n += 1
             now = time.monotonic()
@@ -141,7 +149,7 @@ def _run_in_thread(router_name: str, config: dict, msg_queue: queue.Queue, cance
 
     def patched_tqdm(iterable=None, *args, **kwargs):
         if iterable is not None:
-            return StreamingTqdm(iterable, msg_queue, desc=kwargs.get('desc', ''))
+            return StreamingTqdm(iterable, msg_queue, cancelled, desc=kwargs.get('desc', ''))
         return original_tqdm(iterable, *args, **kwargs)
 
     tqdm_module.tqdm = patched_tqdm
@@ -183,6 +191,9 @@ def _run_in_thread(router_name: str, config: dict, msg_queue: queue.Queue, cance
             'num_rivers': num_rivers,
             'num_timesteps': num_timesteps,
         }))
+
+    except SimulationCancelled:
+        msg_queue.put(('cancelled', '', ''))
 
     except Exception as e:
         import traceback

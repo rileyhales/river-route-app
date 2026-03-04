@@ -1,13 +1,22 @@
-import { useRef, useEffect } from 'preact/hooks'
+import { useRef, useEffect, useState } from 'preact/hooks'
 
 export function ProgressPanel({ percent, logs, status }) {
   const logEndRef = useRef(null)
+  const [copied, setCopied] = useState(false)
 
   useEffect(() => {
     if (logEndRef.current) {
       logEndRef.current.scrollIntoView({ behavior: 'smooth' })
     }
   }, [logs])
+
+  const copyLogs = () => {
+    const text = logs.map(l => `${l.level}  ${l.message}`).join('\n')
+    navigator.clipboard.writeText(text).then(() => {
+      setCopied(true)
+      setTimeout(() => setCopied(false), 2000)
+    })
+  }
 
   const levelColor = (level) => {
     switch (level) {
@@ -39,7 +48,13 @@ export function ProgressPanel({ percent, logs, status }) {
       </div>
 
       {/* Log console — fills all remaining vertical space */}
-      <div style={styles.console}>
+      <div style={styles.consoleWrapper}>
+        {logs.length > 0 && (
+          <button style={styles.copyBtn} onClick={copyLogs}>
+            {copied ? 'Copied!' : 'Copy Logs'}
+          </button>
+        )}
+        <div style={styles.console}>
         {logs.map((log, i) => (
           <div key={i} style={styles.logLine}>
             <span style={{ color: levelColor(log.level), fontWeight: '500', marginRight: '8px', fontSize: '11px' }}>
@@ -49,6 +64,7 @@ export function ProgressPanel({ percent, logs, status }) {
           </div>
         ))}
         <div ref={logEndRef} />
+        </div>
       </div>
     </div>
   )
@@ -87,6 +103,27 @@ const styles = {
     color: '#38bdf8',
     minWidth: '50px',
     textAlign: 'right',
+  },
+  consoleWrapper: {
+    flex: 1,
+    minHeight: 0,
+    position: 'relative',
+    display: 'flex',
+    flexDirection: 'column',
+  },
+  copyBtn: {
+    position: 'absolute',
+    top: '8px',
+    right: '8px',
+    zIndex: 1,
+    background: '#334155',
+    color: '#cbd5e1',
+    border: '1px solid #475569',
+    borderRadius: '4px',
+    padding: '6px 14px',
+    fontSize: '13px',
+    cursor: 'pointer',
+    fontFamily: 'inherit',
   },
   console: {
     flex: 1,

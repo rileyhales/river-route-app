@@ -1,4 +1,4 @@
-import { useContext } from 'preact/hooks'
+import { useState, useContext } from 'preact/hooks'
 import { ConfigContext } from '../app.jsx'
 import { VALID_KEYS } from './RouterForm.jsx'
 
@@ -41,13 +41,13 @@ export function resolveDischargeDir(config) {
 }
 
 function generateCode(config) {
-  const router = config.router || 'Muskingum'
+  const router = config._router || 'Muskingum'
 
   // Resolve discharge_dir → discharge_files (same logic as Python Configs)
   const resolved = resolveDischargeDir(config)
 
   // Fields to include as constructor kwargs — skip empty/default values
-  const SKIP = new Set(['router'])
+  const SKIP = new Set(['_router'])
   const DEFAULT_STRINGS = new Set(['1970-01-01', ''])
   const DEFAULT_VARS = {
     var_river_id: 'river_id',
@@ -118,6 +118,17 @@ function formatValue(val) {
   return String(val)
 }
 
+function generateJSON(config) {
+  const resolved = resolveDischargeDir(config)
+  const cleaned = {}
+  for (const [key, val] of Object.entries(resolved)) {
+    if (val === null || val === undefined || val === '') continue
+    if (Array.isArray(val) && val.length === 0) continue
+    cleaned[key] = val
+  }
+  return JSON.stringify(cleaned, null, 2)
+}
+
 /**
  * Tokenize a Python code string into spans for syntax highlighting.
  */
@@ -161,6 +172,54 @@ function highlightLine(line) {
   return parts
 }
 
+function highlightJSON(line) {
+  const parts = []
+  let remaining = line
+  const patterns = [
+    { type: 'string', re: /^("[^"]*")/ },
+    { type: 'number', re: /^(-?\d+(?:\.\d+)?)/ },
+    { type: 'keyword', re: /^(true|false|null)\b/ },
+    { type: 'paren', re: /^([\[\]{}])/ },
+    { type: 'punct', re: /^([,:])/ },
+    { type: 'space', re: /^(\s+)/ },
+  ]
+  let safety = 0
+  while (remaining.length > 0 && safety++ < 500) {
+    let matched = false
+    for (const { type, re } of patterns) {
+      const m = remaining.match(re)
+      if (m) {
+        const text = m[1]
+        // Distinguish JSON keys (strings followed by colon) from string values
+        if (type === 'string' && remaining.slice(text.length).trimStart().startsWith(':')) {
+          parts.push({ type: 'key', text })
+        } else {
+          parts.push({ type, text })
+        }
+        remaining = remaining.slice(text.length)
+        matched = true
+        break
+      }
+    }
+    if (!matched) {
+      parts.push({ type: 'plain', text: remaining[0] })
+      remaining = remaining.slice(1)
+    }
+  }
+  return parts
+}
+
+const JSON_TOKEN_COLORS = {
+  key: '#93c5fd',
+  string: 'var(--code-string)',
+  number: 'var(--code-number)',
+  keyword: 'var(--code-keyword)',
+  paren: '#94a3b8',
+  punct: '#94a3b8',
+  space: undefined,
+  plain: 'var(--code-text)',
+}
+
 const TOKEN_COLORS = {
   keyword: 'var(--code-keyword)',
   string: 'var(--code-string)',
@@ -177,20 +236,46 @@ const TOKEN_COLORS = {
 
 export function CodePreview() {
   const { config } = useContext(ConfigContext)
+  const [view, setView] = useState('python')
+  const [copied, setCopied] = useState(false)
 
   const code = generateCode(config)
-  const lines = code.split('\n')
+  const json = generateJSON(config)
+  const content = view === 'python' ? code : json
+  const lines = content.split('\n')
+  const highlighter = view === 'python' ? highlightLine : highlightJSON
+  const colors = view === 'python' ? TOKEN_COLORS : JSON_TOKEN_COLORS
+
+  const handleCopy = () => {
+    navigator.clipboard.writeText(content).then(() => {
+      setCopied(true)
+      setTimeout(() => setCopied(false), 1500)
+    })
+  }
 
   return (
     <div style={styles.container}>
       <div style={styles.header}>
-        <span style={styles.headerText}>Python Preview</span>
+        <div style={styles.tabs}>
+          <button
+            style={{ ...styles.tab, ...(view === 'python' ? styles.tabActive : {}) }}
+            onClick={() => setView('python')}
+          >
+            Python
+          </button>
+          <button
+            style={{ ...styles.tab, ...(view === 'json' ? styles.tabActive : {}) }}
+            onClick={() => setView('json')}
+          >
+            JSON
+          </button>
+        </div>
         <button
-          style={styles.copyBtn}
-          onClick={() => navigator.clipboard.writeText(code)}
+          style={{ ...styles.copyBtn, ...(copied ? styles.copyBtnSuccess : {}) }}
+          onClick={handleCopy}
           title="Copy to clipboard"
         >
-          Copy
+          {copied ? 'Copied!' : 'Copy'}
         </button>
       </div>
       <pre style={styles.code}>
@@ -198,8 +283,8 @@ export function CodePreview() {
           <div key={i} style={styles.line}>
             <span style={styles.lineNum}>{i + 1}</span>
             <span>
-              {highlightLine(line).map((tok, j) => (
-                <span key={j} style={{ color: TOKEN_COLORS[tok.type] }}>{tok.text}</span>
+              {highlighter(line).map((tok, j) => (
+                <span key={j} style={{ color: colors[tok.type] }}>{tok.text}</span>
               ))}
             </span>
           </div>
@@ -222,23 +307,43 @@ const styles = {
     display: 'flex',
     justifyContent: 'space-between',
     alignItems: 'center',
-    padding: '10px 16px',
+    padding: '8px 16px',
     borderBottom: '1px solid #334155',
   },
-  headerText: {
-    fontSize: '12px',
-    fontWeight: '500',
-    color: '#94a3b8',
-    letterSpacing: '0.3px',
+  tabs: {
+    display: 'flex',
+    gap: '2px',
+  },
+  tab: {
+    background: 'transparent',
+    color: '#64748b',
+    border: 'none',
+    borderRadius: '4px',
+    padding: '6px 14px',
+    fontSize: '14px',
+    fontWeight: '600',
+    cursor: 'pointer',
+    fontFamily: 'inherit',
+  },
+  tabActive: {
+    background: '#334155',
+    color: '#e2e8f0',
   },
   copyBtn: {
     background: '#334155',
     color: '#cbd5e1',
     border: 'none',
     borderRadius: '4px',
-    padding: '3px 10px',
-    fontSize: '11px',
+    padding: '6px 14px',
+    fontSize: '13px',
+    fontWeight: '500',
     cursor: 'pointer',
+    transition: 'all 0.15s',
+    minWidth: '64px',
+  },
+  copyBtnSuccess: {
+    background: '#059669',
+    color: '#fff',
   },
   code: {
     flex: '1',
@@ -249,6 +354,9 @@ const styles = {
     fontSize: '13px',
     lineHeight: '1.6',
     color: 'var(--code-text)',
+    cursor: 'text',
+    userSelect: 'text',
+    WebkitUserSelect: 'text',
   },
   line: {
     display: 'flex',
