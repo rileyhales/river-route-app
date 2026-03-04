@@ -21,8 +21,8 @@ export function resolveDischargeDir(config) {
 
   const inputFiles = (config.catchment_runoff_files && config.catchment_runoff_files.length > 0)
     ? config.catchment_runoff_files
-    : (config.runoff_grid_files && config.runoff_grid_files.length > 0)
-      ? config.runoff_grid_files
+    : (config.grid_runoff_files && config.grid_runoff_files.length > 0)
+      ? config.grid_runoff_files
       : []
 
   let resolved
@@ -59,7 +59,7 @@ function generateCode(config) {
     var_runoff_depth: 'ro',
     log_level: 'INFO',
     runoff_processing_mode: 'sequential',
-    runoff_accumulation_type: 'incremental',
+    grid_accumulation_type: 'incremental',
   }
 
   const allowed = VALID_KEYS[router] || VALID_KEYS.Muskingum

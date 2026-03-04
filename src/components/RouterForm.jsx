@@ -21,7 +21,7 @@ const LATERAL_MODE_FIELDS = {
     { key: 'catchment_runoff_files', label: 'Catchment Runoff Files', type: 'multifile', required: true, hint: 'netCDF files with per-catchment runoff' },
   ],
   grid: [
-    { key: 'runoff_grid_files', label: 'Runoff Grid Files', type: 'multifile', required: true, hint: 'netCDF gridded runoff depth files' },
+    { key: 'grid_runoff_files', label: 'Runoff Grid Files', type: 'multifile', required: true, hint: 'netCDF gridded runoff depth files' },
     { key: 'grid_weights_file', label: 'Grid Weights File', type: 'file', required: true, hint: 'netCDF weight table mapping grid to catchments' },
   ],
 }
@@ -35,11 +35,11 @@ const TRANSFORM_TIME_FIELDS = [
 
 const PROCESSING_FIELDS = [
   { key: 'runoff_processing_mode', label: 'Processing Mode', type: 'select', options: ['sequential', 'ensemble'] },
-  { key: 'runoff_accumulation_type', label: 'Accumulation Type', type: 'select', options: ['incremental', 'cumulative'] },
+  { key: 'grid_accumulation_type', label: 'Accumulation Type', type: 'select', options: ['incremental', 'cumulative'] },
 ]
 
 const UNIT_FIELDS = [
-  { key: 'transformer_kernel_file', label: 'Unit Hydrograph Kernel', type: 'file', required: true, hint: 'Parquet kernel file (n_basins x n_timesteps)' },
+  { key: 'transformer_kernel_file', label: 'Unit Hydrograph Kernel', type: 'file', required: true, hint: 'Scipy sparse npz kernel file' },
   { key: 'transformer_state_init_file', label: 'Initial Transformer State', type: 'file', hint: 'Parquet state file (optional warm start)' },
   { key: 'transformer_state_final_file', label: 'Final Transformer State Output', type: 'file', hint: 'Path to write final transformer state' },
 ]
@@ -76,11 +76,11 @@ export const VALID_KEYS = {
     'params_file', 'channel_state_init_file', 'channel_state_final_file',
     'discharge_dir', 'discharge_files',
     // input data
-    'catchment_runoff_files', 'runoff_grid_files', 'grid_weights_file',
+    'catchment_runoff_files', 'grid_runoff_files', 'grid_weights_file',
     // time (all optional for Rapid — NO start_datetime per docs)
     'dt_routing', 'dt_runoff', 'dt_discharge', 'dt_total',
     // processing
-    'runoff_processing_mode', 'runoff_accumulation_type',
+    'runoff_processing_mode', 'grid_accumulation_type',
     // variable names (all)
     'var_river_id', 'var_discharge', 'var_x', 'var_y', 'var_t',
     'var_catchment_runoff_variable', 'var_runoff_depth', 'log_level',
@@ -91,13 +91,13 @@ export const VALID_KEYS = {
     'params_file', 'channel_state_init_file', 'channel_state_final_file',
     'discharge_dir', 'discharge_files',
     // input data
-    'catchment_runoff_files', 'runoff_grid_files', 'grid_weights_file',
+    'catchment_runoff_files', 'grid_runoff_files', 'grid_weights_file',
     // unit hydrograph
     'transformer_kernel_file', 'transformer_state_init_file', 'transformer_state_final_file',
     // time (all optional — NO start_datetime per docs)
     'dt_routing', 'dt_runoff', 'dt_discharge', 'dt_total',
     // processing
-    'runoff_processing_mode', 'runoff_accumulation_type',
+    'runoff_processing_mode', 'grid_accumulation_type',
     // variable names (all)
     'var_river_id', 'var_discharge', 'var_x', 'var_y', 'var_t',
     'var_catchment_runoff_variable', 'var_runoff_depth', 'log_level',
@@ -227,7 +227,7 @@ function FieldGroup({ title, fields, config, onChange }) {
 
 function inferLateralMode(config) {
   const hasCatchment = config.catchment_runoff_files && config.catchment_runoff_files.length > 0
-  const hasGrid = (config.runoff_grid_files && config.runoff_grid_files.length > 0) || config.grid_weights_file
+  const hasGrid = (config.grid_runoff_files && config.grid_runoff_files.length > 0) || config.grid_weights_file
   if (hasCatchment) return 'catchment'
   if (hasGrid) return 'grid'
   return 'catchment'
@@ -242,7 +242,7 @@ export function RouterForm({ router, config, onChange }) {
   // Update lateral mode when config changes (e.g. JSON loaded)
   useEffect(() => {
     setLateralMode(inferLateralMode(config))
-  }, [config.catchment_runoff_files, config.runoff_grid_files, config.grid_weights_file])
+  }, [config.catchment_runoff_files, config.grid_runoff_files, config.grid_weights_file])
   const isTransform = router === 'RapidMuskingum' || router === 'UnitMuskingum'
 
   return (
