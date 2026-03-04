@@ -288,26 +288,6 @@ const styles = {
     padding: '2px 8px',
     borderRadius: '4px',
   },
-  timingRow: {
-    display: 'flex',
-    gap: '20px',
-    flexWrap: 'wrap',
-  },
-  timingItem: {
-    display: 'flex',
-    alignItems: 'center',
-    gap: '6px',
-  },
-  timingLabel: {
-    fontSize: '13px',
-    fontWeight: '600',
-    color: 'var(--text-secondary)',
-  },
-  timingValue: {
-    fontSize: '13px',
-    fontFamily: 'ui-monospace, "SF Mono", Menlo, Monaco, monospace',
-    color: 'var(--text-primary)',
-  },
   statsSection: {
     flexShrink: 0,
     marginBottom: '16px',

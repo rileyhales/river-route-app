@@ -39,25 +39,21 @@ export function ConfigPage({ onNavigate }) {
     setValidation(null)
     const { _router, ...cfgFields } = config
 
-    const cleanup = () => { unsubResult(); unsubError(); clearTimeout(timer) }
-
-    const unsubResult = ws.on('validation_result', (data) => {
-      cleanup()
-      setValidation(data)
-      setValidating(false)
-    })
-    const unsubError = ws.on('error', (data) => {
-      cleanup()
-      setValidation({ valid: false, errors: [data.error || 'Validation failed'] })
-      setValidating(false)
-    })
-    const timer = setTimeout(() => {
-      cleanup()
-      setValidation({ valid: false, errors: ['Validation timed out — is the server running?'] })
-      setValidating(false)
-    }, 10000)
-
-    ws.send({ type: 'validate_config', config: cfgFields })
+    ws.request(
+      { type: 'validate_config', config: cfgFields },
+      'validation_result',
+      (data) => {
+        setValidation(data)
+        setValidating(false)
+      },
+      {
+        timeout: 10000,
+        onError: (data) => {
+          setValidation({ valid: false, errors: [data.error || 'Validation failed'] })
+          setValidating(false)
+        },
+      },
+    )
   }, [ws, config])
 
   const saveConfig = useCallback(() => {

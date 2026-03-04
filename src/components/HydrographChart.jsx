@@ -1,8 +1,7 @@
 import { useRef, useEffect } from 'preact/hooks'
 import Plotly from 'plotly.js-dist-min'
 import { alignTimeSeries } from '../utils/alignTimeSeries.js'
-
-const OVERLAY_COLORS = ['#f97316', '#a855f7', '#14b8a6', '#ef4444', '#eab308']
+import { OVERLAY_COLORS } from '../utils/colors.js'
 
 export function HydrographChart({ times, discharge, riverId, overlays = [] }) {
   const containerRef = useRef(null)
@@ -46,6 +45,8 @@ export function HydrographChart({ times, discharge, riverId, overlays = [] }) {
       title: `River ${riverId} — Discharge Hydrograph`,
       xaxis: { type: 'date' },
       yaxis: { title: 'Discharge (m³/s)' },
+      paper_bgcolor: 'transparent',
+      plot_bgcolor: 'transparent',
     }
 
     const config = {
@@ -101,7 +102,7 @@ export function HydrographChart({ times, discharge, riverId, overlays = [] }) {
       <div style={{ marginBottom: '8px' }}>
         <button
           class="btn-secondary"
-          style={{ fontSize: '12px', padding: '4px 10px' }}
+          style={{ fontSize: '13px', padding: '6px 14px' }}
           onClick={downloadCSV}
         >
           Download CSV

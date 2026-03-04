@@ -31,41 +31,52 @@ export function FileBrowser({ open, mode, initialPath, onSelect, onClose }) {
   const columnsRef = useRef(columns)
   columnsRef.current = columns
 
+  const browseCleanupRef = useRef(null)
+
   const browse = useCallback((path, colIndex) => {
     setError(null)
     setPendingCol(colIndex)
-    ws.send({ type: 'browse_files', path: path || root, mode: mode || 'file' })
+
+    // Cancel any in-flight browse request
+    if (browseCleanupRef.current) browseCleanupRef.current()
+
+    browseCleanupRef.current = ws.request(
+      { type: 'browse_files', path: path || root, mode: mode || 'file' },
+      'browse_result',
+      (data) => {
+        browseCleanupRef.current = null
+        if (data.error) {
+          setError(data.error)
+          setPendingCol(null)
+          return
+        }
+        setError(null)
+        const sorted = sortEntries(data.entries || [])
+        setPendingCol(prev => {
+          const idx = prev ?? 0
+          setColumns(cols => {
+            const updated = cols.slice(0, idx)
+            updated.push({ path: data.path, entries: sorted, selected: null })
+            return updated
+          })
+          return null
+        })
+      },
+    )
   }, [ws, mode, root])
 
   useEffect(() => {
     if (!open) return
-
-    const unsub = ws.on('browse_result', (data) => {
-      if (data.error) {
-        setError(data.error)
-        setPendingCol(null)
-        return
-      }
-      setError(null)
-      const sorted = sortEntries(data.entries || [])
-      setPendingCol(prev => {
-        const idx = prev ?? 0
-        setColumns(cols => {
-          const updated = cols.slice(0, idx)
-          updated.push({ path: data.path, entries: sorted, selected: null })
-          return updated
-        })
-        return null
-      })
-    })
 
     // Only browse from root on first open — columns persist across close/reopen
     if (columnsRef.current.length === 0) {
       browse(root, 0)
     }
 
-    return unsub
-  }, [open, ws, browse, root])
+    return () => {
+      if (browseCleanupRef.current) browseCleanupRef.current()
+    }
+  }, [open, browse, root])
 
   // Auto-scroll to rightmost column
   useEffect(() => {

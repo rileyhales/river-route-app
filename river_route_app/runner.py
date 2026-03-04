@@ -130,6 +130,7 @@ class StreamingTqdm:
 
 def _run_in_thread(router_name: str, config: dict, msg_queue: queue.Queue, cancelled: threading.Event):
     """Execute the simulation in a background thread, streaming log/progress to the queue."""
+    import sys
     import tqdm as tqdm_module
     from river_route import Muskingum, RapidMuskingum, UnitMuskingum
 
@@ -144,7 +145,9 @@ def _run_in_thread(router_name: str, config: dict, msg_queue: queue.Queue, cance
         msg_queue.put(('error', f'Unknown router: {router_name}', ''))
         return
 
-    # Monkey-patch tqdm in this thread's scope so progress goes to the queue
+    # Monkey-patch tqdm so progress goes to the queue.
+    # Patch both the tqdm module and any river_route submodules that already imported it,
+    # so calls like `from tqdm import tqdm` inside river_route also use our version.
     original_tqdm = tqdm_module.tqdm
 
     def patched_tqdm(iterable=None, *args, **kwargs):
@@ -152,7 +155,13 @@ def _run_in_thread(router_name: str, config: dict, msg_queue: queue.Queue, cance
             return StreamingTqdm(iterable, msg_queue, cancelled, desc=kwargs.get('desc', ''))
         return original_tqdm(iterable, *args, **kwargs)
 
+    patched_modules = []
     tqdm_module.tqdm = patched_tqdm
+    for mod_name, mod in sys.modules.items():
+        if mod_name.startswith('river_route') and mod is not None and hasattr(mod, 'tqdm'):
+            if getattr(mod, 'tqdm') is original_tqdm:
+                mod.tqdm = patched_tqdm
+                patched_modules.append(mod)
 
     try:
         # Force progress_bar on and log on so we capture output
@@ -201,6 +210,8 @@ def _run_in_thread(router_name: str, config: dict, msg_queue: queue.Queue, cance
 
     finally:
         tqdm_module.tqdm = original_tqdm
+        for mod in patched_modules:
+            mod.tqdm = original_tqdm
 
 
 async def run_simulation(router_name: str, config: dict):

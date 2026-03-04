@@ -68,7 +68,7 @@ function generateCode(config) {
   for (const [key, val] of Object.entries(resolved)) {
     if (SKIP.has(key)) continue
     if (!allowed.has(key)) continue
-    if (val === null || val === undefined || val === '' || val === 0) continue
+    if (val === null || val === undefined || val === '') continue
     if (Array.isArray(val) && val.length === 0) continue
     if (DEFAULT_VARS[key] !== undefined && val === DEFAULT_VARS[key]) continue
     if (typeof val === 'string' && DEFAULT_STRINGS.has(val)) continue
@@ -113,7 +113,7 @@ function generateCode(config) {
 }
 
 function formatValue(val) {
-  if (typeof val === 'string') return `'${val}'`
+  if (typeof val === 'string') return `'${val.replace(/\\/g, '\\\\').replace(/'/g, "\\'")}'`
   if (typeof val === 'boolean') return val ? 'True' : 'False'
   return String(val)
 }

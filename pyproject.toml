@@ -14,9 +14,14 @@ authors = [
 ]
 dependencies = [
     "river-route~=2.0.0",
+    "numpy",
+    "xarray",
     "starlette>=0.40",
     "uvicorn[standard]>=0.30",
 ]
+
+[project.scripts]
+river-route-app = "river_route_app.server:main"
 
 [tool.setuptools.packages.find]
 include = ["river_route_app*"]

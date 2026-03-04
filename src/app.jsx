@@ -108,18 +108,23 @@ export function App() {
     return () => unsubs.forEach(fn => fn())
   }, [ws])
 
-  // Auto-navigate on status transitions (not on restored state from server snapshot)
+  // Auto-navigate only on specific user-initiated transitions
   const prevRunStatus = useRef(runStatus)
   useEffect(() => {
     const prev = prevRunStatus.current
     prevRunStatus.current = runStatus
-    // Only navigate if this is a real transition, not initial/restored state
-    if (prev === 'idle' && runStatus !== 'idle') return // skip snapshot restores
-    if (runStatus === 'running' && prev === 'validating') setPage('run')
-    if (runStatus === 'complete' && prev === 'running') setPage('results')
+    // validating -> running: user clicked Run, navigate to run page
+    if (prev === 'validating' && runStatus === 'running') setPage('run')
+    // running -> complete: simulation finished, navigate to results
+    if (prev === 'running' && runStatus === 'complete') setPage('results')
   }, [runStatus])
 
   const run = useCallback(() => {
+    if (!ws.connected) {
+      setRunErrors(['Not connected to server'])
+      setRunStatus('error')
+      return
+    }
     setRunStatus('validating')
     setStartedAt(new Date())
     setFinishedAt(null)
@@ -129,17 +134,26 @@ export function App() {
     setRunErrors([])
 
     const { _router: router, ...cfgFields } = resolveDischargeDir(config)
-    ws.send({ type: 'validate_config', config: cfgFields })
-    const unsub = ws.on('validation_result', (data) => {
-      unsub()
-      if (!data.valid) {
-        setRunStatus('error')
-        setRunErrors(data.errors)
-        return
-      }
-      setRunStatus('running')
-      ws.send({ type: 'run_simulation', router: router, config: cfgFields })
-    })
+    ws.request(
+      { type: 'validate_config', config: cfgFields },
+      'validation_result',
+      (data) => {
+        if (!data.valid) {
+          setRunStatus('error')
+          setRunErrors(data.errors)
+          return
+        }
+        setRunStatus('running')
+        ws.send({ type: 'run_simulation', router: router, config: cfgFields })
+      },
+      {
+        timeout: 15000,
+        onError: (data) => {
+          setRunStatus('error')
+          setRunErrors([data.error || 'Validation failed'])
+        },
+      },
+    )
   }, [ws, config])
 
   const cancel = useCallback(() => {

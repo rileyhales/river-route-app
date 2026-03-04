@@ -1,5 +1,4 @@
-const OVERLAY_COLORS = ['#f97316', '#a855f7', '#14b8a6', '#ef4444', '#eab308']
-let colorIndex = 0
+import { OVERLAY_COLORS } from './colors.js'
 
 /**
  * Parse CSV text into an overlay object.
@@ -9,9 +8,10 @@ let colorIndex = 0
  *
  * @param {string} text - raw CSV content
  * @param {string} label - display label for this overlay
+ * @param {number} colorIndex - index into OVERLAY_COLORS for this overlay's color
  * @returns {{ label: string, times: string[], discharge: number[], color: string }}
  */
-export function parseCSV(text, label) {
+export function parseCSV(text, label, colorIndex = 0) {
   const lines = text.trim().split(/\r?\n/)
   if (lines.length < 2) return null
 
@@ -40,7 +40,6 @@ export function parseCSV(text, label) {
   if (times.length === 0) return null
 
   const color = OVERLAY_COLORS[colorIndex % OVERLAY_COLORS.length]
-  colorIndex++
 
   return { label, times, discharge, color }
 }

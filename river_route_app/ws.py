@@ -7,23 +7,30 @@ from .browser import browse_directory
 from .results import read_result_data
 from .runner import sim_state, run_simulation
 
-# Per-session working directory — defaults to cwd where the server was launched
-_workdir = os.getcwd()
-
 
 async def handle_ws_message(websocket: WebSocket, data: dict) -> None:
-    global _workdir
     msg_type = data.get('type')
+    req_id = data.get('_reqId')
+
+    # Per-session workdir stored on the websocket's state dict
+    if not hasattr(websocket, '_workdir'):
+        websocket._workdir = os.getcwd()
+
+    def _tag(result: dict) -> dict:
+        """Echo _reqId back so the client can correlate responses."""
+        if req_id is not None:
+            result['_reqId'] = req_id
+        return result
 
     try:
         if msg_type == 'browse_files':
             path = os.path.expanduser(data.get('path', '') or '~')
             result = browse_directory(path, data.get('mode', 'file'))
-            await websocket.send_json(result)
+            await websocket.send_json(_tag(result))
 
         elif msg_type == 'validate_config':
             result = _validate_config(data.get('config', {}))
-            await websocket.send_json(result)
+            await websocket.send_json(_tag(result))
 
         elif msg_type == 'run_simulation':
             await run_simulation(data.get('router', ''), _clean_config(data.get('config', {})))
@@ -32,10 +39,10 @@ async def handle_ws_message(websocket: WebSocket, data: dict) -> None:
             if sim_state.running:
                 sim_state.cancel()
             else:
-                await websocket.send_json({'type': 'sim_cancelled'})
+                await websocket.send_json(_tag({'type': 'sim_cancelled'}))
 
         elif msg_type == 'get_sim_status':
-            await websocket.send_json(sim_state.get_snapshot())
+            await websocket.send_json(_tag(sim_state.get_snapshot()))
 
         elif msg_type == 'read_results':
             files = data.get('files', [])
@@ -49,11 +56,11 @@ async def handle_ws_message(websocket: WebSocket, data: dict) -> None:
                         if f.endswith('.nc') and os.path.isfile(os.path.join(directory, f))
                     )
                 else:
-                    await websocket.send_json({
+                    await websocket.send_json(_tag({
                         'type': 'result_data',
                         'error': f'Not a directory: {directory}',
                         'source': data.get('source'),
-                    })
+                    }))
                     return
             result = read_result_data(
                 files,
@@ -69,31 +76,31 @@ async def handle_ws_message(websocket: WebSocket, data: dict) -> None:
                 result['files'] = files
             if directory:
                 result['directory'] = directory
-            await websocket.send_json(result)
+            await websocket.send_json(_tag(result))
 
         elif msg_type == 'set_workdir':
             path = os.path.abspath(data.get('path', '') or os.getcwd())
             if os.path.isdir(path):
-                _workdir = path
-                await websocket.send_json({'type': 'workdir_set', 'path': _workdir})
+                websocket._workdir = path
+                await websocket.send_json(_tag({'type': 'workdir_set', 'path': websocket._workdir}))
             else:
-                await websocket.send_json({'type': 'error', 'error': f'Not a directory: {path}'})
+                await websocket.send_json(_tag({'type': 'error', 'error': f'Not a directory: {path}'}))
 
         elif msg_type == 'get_workdir':
-            await websocket.send_json({'type': 'workdir_set', 'path': _workdir})
+            await websocket.send_json(_tag({'type': 'workdir_set', 'path': websocket._workdir}))
 
         elif msg_type == 'get_homedir':
-            await websocket.send_json({'type': 'homedir', 'path': os.path.expanduser('~')})
+            await websocket.send_json(_tag({'type': 'homedir', 'path': os.path.expanduser('~')}))
 
         else:
-            await websocket.send_json({'type': 'error', 'error': f'Unknown message type: {msg_type}'})
+            await websocket.send_json(_tag({'type': 'error', 'error': f'Unknown message type: {msg_type}'}))
 
     except Exception as e:
-        await websocket.send_json({
+        await websocket.send_json(_tag({
             'type': 'error',
             'error': str(e),
             'traceback': traceback.format_exc(),
-        })
+        }))
 
 
 def _clean_config(config: dict) -> dict:

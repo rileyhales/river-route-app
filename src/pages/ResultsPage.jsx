@@ -4,6 +4,7 @@ import { resolveDischargeDir } from '../components/CodePreview.jsx'
 import { HydrographChart } from '../components/HydrographChart.jsx'
 import { FileBrowser } from '../components/FileBrowser.jsx'
 import { parseCSV } from '../utils/parseCSV.js'
+import { OVERLAY_COLORS } from '../utils/colors.js'
 
 /** Compute cumulative discharged volume from uniform-timestep data */
 function formatVolume(times, discharge) {
@@ -68,7 +69,7 @@ export function ResultsBrowser() {
   const [compDirInput, setCompDirInput] = useState('')
   const [compDirLoading, setCompDirLoading] = useState(false)
   const [fileBrowserOpen, setFileBrowserOpen] = useState(false)
-  const scanCallbackRef = useRef(null)
+  const scanCleanupRef = useRef(null)
 
   // Persist river_id to sessionStorage
   useEffect(() => {
@@ -95,50 +96,36 @@ export function ResultsBrowser() {
     setCompDirLoading(true)
     setError(null)
 
-    // Clean up any previous pending scan
-    if (scanCallbackRef.current) scanCallbackRef.current()
+    // Cancel any in-flight scan
+    if (scanCleanupRef.current) scanCleanupRef.current()
 
-    const timeout = setTimeout(() => {
-      cleanup()
-      setCompDirLoading(false)
-      setError(`Timeout scanning: ${dirPath}`)
-    }, 10000)
-
-    // One-shot listener — accept the first browse_result that isn't from an open FileBrowser
-    const unsub = ws.on('browse_result', (data) => {
-      cleanup()
-      setCompDirLoading(false)
-      if (data.error) {
-        setError(data.error)
-        return
-      }
-      const ncFiles = (data.entries || [])
-        .filter(e => e.type === 'file' && e.name.endsWith('.nc'))
-        .map(e => `${data.path}/${e.name}`)
-        .sort()
-      if (ncFiles.length === 0) {
-        setError(`No .nc files found in: ${data.path}`)
-        return
-      }
-      setError(null)
-      const absDir = data.path
-      // Default label from last directory name
-      const defaultLabel = absDir.split('/').filter(Boolean).pop() || 'Comparison'
-      setCompDatasets(prev => {
-        if (prev.some(d => d.directory === absDir)) return prev
-        return [...prev, { directory: absDir, files: ncFiles, label: defaultLabel }]
-      })
-    })
-
-    const cleanup = () => {
-      clearTimeout(timeout)
-      unsub()
-      scanCallbackRef.current = null
-    }
-    scanCallbackRef.current = cleanup
-
-    // Send with mode='file' so the response includes .nc files (not just directories)
-    ws.send({ type: 'browse_files', path: dirPath, mode: 'file' })
+    scanCleanupRef.current = ws.request(
+      { type: 'browse_files', path: dirPath, mode: 'file' },
+      'browse_result',
+      (data) => {
+        scanCleanupRef.current = null
+        setCompDirLoading(false)
+        if (data.error) {
+          setError(data.error)
+          return
+        }
+        const ncFiles = (data.entries || [])
+          .filter(e => e.type === 'file' && e.name.endsWith('.nc'))
+          .map(e => `${data.path}/${e.name}`)
+          .sort()
+        if (ncFiles.length === 0) {
+          setError(`No .nc files found in: ${data.path}`)
+          return
+        }
+        setError(null)
+        const absDir = data.path
+        const defaultLabel = absDir.split('/').filter(Boolean).pop() || 'Comparison'
+        setCompDatasets(prev => {
+          if (prev.some(d => d.directory === absDir)) return prev
+          return [...prev, { directory: absDir, files: ncFiles, label: defaultLabel }]
+        })
+      },
+    )
   }, [ws])
 
   const loadRiver = useCallback(() => {
@@ -339,7 +326,6 @@ export function ResultsChart() {
         const fallbackLabel = (data.files?.[0] || '').split('/').slice(-2, -1)[0]
           || (data.files?.[0] || '').split('/').pop()
           || 'Comparison'
-        const OVERLAY_COLORS = ['#f97316', '#a855f7', '#14b8a6', '#ef4444', '#eab308']
         setOverlays(prev => {
           const color = OVERLAY_COLORS[prev.length % OVERLAY_COLORS.length]
           return [...prev, {
@@ -363,14 +349,15 @@ export function ResultsChart() {
   }
 
   const loadCSVFiles = (files) => {
-    Array.from(files).forEach((file) => {
+    Array.from(files).forEach((file, fileIdx) => {
       if (!file.name.endsWith('.csv')) return
       const reader = new FileReader()
       reader.onload = () => {
-        const overlay = parseCSV(reader.result, file.name.replace('.csv', ''))
-        if (overlay) {
-          setOverlays(prev => [...prev, overlay])
-        }
+        setOverlays(prev => {
+          const overlay = parseCSV(reader.result, file.name.replace('.csv', ''), prev.length + fileIdx)
+          if (overlay) return [...prev, overlay]
+          return prev
+        })
       }
       reader.readAsText(file)
     })
@@ -401,7 +388,7 @@ export function ResultsChart() {
     <div style={styles.overlayControls}>
       <button
         class="btn-secondary"
-        style={{ fontSize: '12px', padding: '4px 10px' }}
+        style={{ fontSize: '13px', padding: '6px 14px' }}
         onClick={() => fileInputRef.current?.click()}
       >
         Upload CSV Overlay
@@ -637,8 +624,8 @@ const styles = {
     wordBreak: 'break-all',
   },
   removeBtn: {
-    fontSize: '11px',
-    padding: '2px 6px',
+    fontSize: '13px',
+    padding: '6px 14px',
     flexShrink: 0,
   },
   errorBlock: {

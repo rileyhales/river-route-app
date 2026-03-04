@@ -152,7 +152,7 @@ function MultiFileField({ field, value, onChange }) {
       {files.map((f, i) => (
         <div key={i} style={{ display: 'flex', gap: '8px', marginBottom: '4px' }}>
           <input value={f} readOnly style={{ flex: 1, fontSize: '12px', fontFamily: 'monospace' }} />
-          <button class="btn-secondary" onClick={() => removeFile(i)} style={{ padding: '4px 8px', fontSize: '12px' }}>
+          <button class="btn-secondary" onClick={() => removeFile(i)} style={{ padding: '6px 14px', fontSize: '13px' }}>
             Remove
           </button>
         </div>
