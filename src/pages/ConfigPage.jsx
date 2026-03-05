@@ -26,7 +26,8 @@ export function ConfigPage({ onNavigate }) {
     setConfig(prev => {
       const next = {}
       for (const key of Object.keys(prev)) {
-        if (key !== '_router' && valid.has(key)) next[key] = prev[key]
+        if (key === '_router') continue
+        if (key.startsWith('_') || valid.has(key)) next[key] = prev[key]
       }
       next._router = r
       return next
