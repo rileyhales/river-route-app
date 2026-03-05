@@ -1,6 +1,6 @@
 import { useState, useContext } from 'preact/hooks'
 import { ConfigContext } from '../app.jsx'
-import { VALID_KEYS } from './RouterForm.jsx'
+import { VALID_KEYS, getExcludedKeys } from './RouterForm.jsx'
 
 /**
  * Generate Python code string from the current config state.
@@ -15,15 +15,28 @@ import { VALID_KEYS } from './RouterForm.jsx'
  * - Returns a new config object with discharge_files populated and discharge_dir removed.
  */
 export function resolveDischargeDir(config) {
+  const excluded = getExcludedKeys(config)
+
+  // If discharge mode is 'files', use discharge_files directly
+  const dm = config._dischargeMode || 'directory'
+  if (dm === 'files') {
+    const out = { ...config }
+    delete out.discharge_dir
+    return out
+  }
+
   const dir = config.discharge_dir
   const files = config.discharge_files
-  if (!dir || (files && files.length > 0)) return config
+  if (!dir || (files && files.length > 0 && dm !== 'directory')) return config
 
-  const inputFiles = (config.qlateral_files && config.qlateral_files.length > 0)
-    ? config.qlateral_files
-    : (config.grid_runoff_files && config.grid_runoff_files.length > 0)
-      ? config.grid_runoff_files
-      : []
+  // Only use input files from the active lateral mode for name generation
+  const lm = config._lateralMode || 'catchment'
+  let inputFiles = []
+  if (lm === 'catchment' && config.qlateral_files?.length > 0) {
+    inputFiles = config.qlateral_files
+  } else if (lm === 'grid' && config.grid_runoff_files?.length > 0) {
+    inputFiles = config.grid_runoff_files
+  }
 
   let resolved
   if (inputFiles.length > 0) {
@@ -62,11 +75,13 @@ function generateCode(config) {
   }
 
   const allowed = VALID_KEYS[router] || VALID_KEYS.Muskingum
+  const excluded = getExcludedKeys(config)
 
   const args = []
   for (const [key, val] of Object.entries(resolved)) {
-    if (SKIP.has(key)) continue
+    if (SKIP.has(key) || key.startsWith('_')) continue
     if (!allowed.has(key)) continue
+    if (excluded.has(key)) continue
     if (val === null || val === undefined || val === '') continue
     if (Array.isArray(val) && val.length === 0) continue
     if (DEFAULT_VARS[key] !== undefined && val === DEFAULT_VARS[key]) continue
@@ -119,8 +134,11 @@ function formatValue(val) {
 
 function generateJSON(config) {
   const resolved = resolveDischargeDir(config)
+  const excluded = getExcludedKeys(config)
   const cleaned = {}
   for (const [key, val] of Object.entries(resolved)) {
+    if (key.startsWith('_')) continue
+    if (excluded.has(key)) continue
     if (val === null || val === undefined || val === '') continue
     if (Array.isArray(val) && val.length === 0) continue
     cleaned[key] = val
