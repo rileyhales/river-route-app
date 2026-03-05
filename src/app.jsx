@@ -4,8 +4,10 @@ import { useWebSocket } from './hooks/useWebSocket.js'
 import { TopBar } from './components/TopBar.jsx'
 import { ConfigPage } from './pages/ConfigPage.jsx'
 import { CodePreview, resolveDischargeDir } from './components/CodePreview.jsx'
+import { getExcludedKeys } from './components/RouterForm.jsx'
 import { RunControls, RunLogs } from './pages/RunPage.jsx'
 import { ResultsBrowser, ResultsChart } from './pages/ResultsPage.jsx'
+import { ValidationControls, ValidationChart } from './pages/ValidationPage.jsx'
 import './style/global.css'
 
 export const WsContext = createContext(null)
@@ -43,7 +45,7 @@ export function App() {
     try {
       return sessionStorage.getItem('rr_page') || 'config'
     } catch { return 'config' }
-  }) // 'config' | 'run' | 'results'
+  }) // 'config' | 'run' | 'results' | 'validation'
 
   // Persist page to sessionStorage so refresh doesn't flash config page
   useEffect(() => {
@@ -145,7 +147,13 @@ export function App() {
     setRunResult(null)
     setRunErrors([])
 
-    const { _router: router, ...cfgFields } = resolveDischargeDir(config)
+    const resolved = resolveDischargeDir(config)
+    const excluded = getExcludedKeys(config)
+    const { _router: router, ...cfgAll } = resolved
+    const cfgFields = {}
+    for (const [k, v] of Object.entries(cfgAll)) {
+      if (!k.startsWith('_') && !excluded.has(k)) cfgFields[k] = v
+    }
     ws.request(
       { type: 'validate_config', config: cfgFields },
       'validation_result',
@@ -218,6 +226,7 @@ export function App() {
                 <div style={{ display: page === 'results' ? 'flex' : 'none', flex: 1, overflow: 'hidden', minWidth: 0 }}>
                   <ResultsBrowser />
                 </div>
+                {page === 'validation' && <ValidationControls />}
               </div>
               <div style={{
                 ...styles.right,
@@ -228,6 +237,7 @@ export function App() {
                 <div style={{ display: page === 'results' ? 'flex' : 'none', flex: 1, overflow: 'hidden', minWidth: 0 }}>
                   <ResultsChart />
                 </div>
+                {page === 'validation' && <ValidationChart />}
               </div>
             </div>
           </RunContext.Provider>

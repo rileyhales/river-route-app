@@ -4,10 +4,12 @@ import { FileBrowser } from './FileBrowser.jsx'
 // Field definitions per router type
 const COMMON_FIELDS = [
   { key: 'params_file', label: 'Parameters File', type: 'file', required: true, hint: 'Parquet file with river_id, downstream_river_id, k, x columns' },
-  { key: 'discharge_dir', label: 'Discharge Output Directory', type: 'directory', required: true, hint: 'Directory where output netCDF files will be written' },
   { key: 'channel_state_init_file', label: 'Initial Channel State', type: 'file', hint: 'Parquet file with Q column (optional warm start)' },
   { key: 'channel_state_final_file', label: 'Final Channel State Output', type: 'file', hint: 'Path to write final channel state parquet' },
 ]
+
+const DISCHARGE_DIR_FIELD = { key: 'discharge_dir', label: 'Discharge Output Directory', type: 'directory', required: true, hint: 'Directory — file names auto-generated from input files' }
+const DISCHARGE_FILES_FIELD = { key: 'discharge_files', label: 'Discharge Output Files', type: 'multifile', required: true, hint: 'Explicit output netCDF file paths' }
 
 const MUSKINGUM_FIELDS = [
   { key: 'dt_routing', label: 'Routing Timestep (seconds)', type: 'number', required: true },
@@ -235,6 +237,11 @@ function FieldGroup({ title, fields, config, onChange }) {
   )
 }
 
+function inferDischargeMode(config) {
+  if (config.discharge_files && config.discharge_files.length > 0) return 'files'
+  return 'directory'
+}
+
 function inferLateralMode(config) {
   const hasCatchment = config.qlateral_files && config.qlateral_files.length > 0
   const hasGrid = (config.grid_runoff_files && config.grid_runoff_files.length > 0) || config.grid_weights_file
@@ -243,21 +250,82 @@ function inferLateralMode(config) {
   return 'catchment'
 }
 
+// Keys excluded from code preview / run based on active mode
+const LATERAL_CATCHMENT_EXCLUDE = new Set(['grid_runoff_files', 'grid_weights_file'])
+const LATERAL_GRID_EXCLUDE = new Set(['qlateral_files'])
+const DISCHARGE_DIR_EXCLUDE = new Set(['discharge_files'])
+const DISCHARGE_FILES_EXCLUDE = new Set(['discharge_dir'])
+
+/** Returns a set of config keys to exclude based on the current mode selections. */
+export function getExcludedKeys(config) {
+  const excluded = new Set()
+  const dm = config._dischargeMode || 'directory'
+  if (dm === 'directory') DISCHARGE_DIR_EXCLUDE.forEach(k => excluded.add(k))
+  else DISCHARGE_FILES_EXCLUDE.forEach(k => excluded.add(k))
+
+  const lm = config._lateralMode || 'catchment'
+  if (lm === 'catchment') LATERAL_CATCHMENT_EXCLUDE.forEach(k => excluded.add(k))
+  else LATERAL_GRID_EXCLUDE.forEach(k => excluded.add(k))
+
+  return excluded
+}
+
 export function RouterForm({ router, config, onChange }) {
-  const [lateralMode, setLateralMode] = useState(() => inferLateralMode(config))
+  const lateralMode = config._lateralMode || inferLateralMode(config)
+  const dischargeMode = config._dischargeMode || inferDischargeMode(config)
   const [advancedOpen, setAdvancedOpen] = useState(false)
   const validKeys = VALID_KEYS[router] || VALID_KEYS.Muskingum
   const filteredAdvanced = ADVANCED_FIELDS.filter(f => validKeys.has(f.key))
 
-  // Update lateral mode when config changes (e.g. JSON loaded)
+  // Sync mode into config on first render if not set
   useEffect(() => {
-    setLateralMode(inferLateralMode(config))
+    if (!config._lateralMode) onChange('_lateralMode', inferLateralMode(config))
+    if (!config._dischargeMode) onChange('_dischargeMode', inferDischargeMode(config))
+  }, [])
+
+  // Update modes when config changes externally (e.g. JSON loaded)
+  useEffect(() => {
+    if (!config._lateralMode) onChange('_lateralMode', inferLateralMode(config))
   }, [config.qlateral_files, config.grid_runoff_files, config.grid_weights_file])
+
+  useEffect(() => {
+    if (!config._dischargeMode) onChange('_dischargeMode', inferDischargeMode(config))
+  }, [config.discharge_files, config.discharge_dir])
+
+  const setLateralMode = (mode) => onChange('_lateralMode', mode)
+  const setDischargeMode = (mode) => onChange('_dischargeMode', mode)
+
   const isTransform = router === 'RapidMuskingum' || router === 'UnitMuskingum'
 
   return (
     <div>
       <FieldGroup title="Core Files" fields={COMMON_FIELDS} config={config} onChange={onChange} />
+
+      <div class="section">
+        <div class="section-title">Discharge Output</div>
+        <div class="form-group">
+          <label class="form-label">Output Mode</label>
+          <div style={{ display: 'flex', gap: '8px' }}>
+            <button
+              class={dischargeMode === 'directory' ? 'btn-primary' : 'btn-secondary'}
+              onClick={() => setDischargeMode('directory')}
+            >
+              Directory
+            </button>
+            <button
+              class={dischargeMode === 'files' ? 'btn-primary' : 'btn-secondary'}
+              onClick={() => setDischargeMode('files')}
+            >
+              Explicit Files
+            </button>
+          </div>
+        </div>
+        {dischargeMode === 'directory' ? (
+          <FormField field={DISCHARGE_DIR_FIELD} value={config.discharge_dir} onChange={onChange} />
+        ) : (
+          <FormField field={DISCHARGE_FILES_FIELD} value={config.discharge_files} onChange={onChange} />
+        )}
+      </div>
 
       {router === 'Muskingum' && (
         <FieldGroup title="Time Parameters" fields={MUSKINGUM_FIELDS} config={config} onChange={onChange} />

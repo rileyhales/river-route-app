@@ -55,7 +55,7 @@ export function ResultsBrowser() {
   const { config } = useContext(ConfigContext)
   const files = useOutputFiles()
 
-  const [riverId, setRiverId] = useState(() => {
+  const [riverIdInput, setRiverIdInput] = useState(() => {
     try { return sessionStorage.getItem('rr_river_id') || '' } catch { return '' }
   })
   const defaultPrimaryLabel = () => {
@@ -71,10 +71,16 @@ export function ResultsBrowser() {
   const [fileBrowserOpen, setFileBrowserOpen] = useState(false)
   const scanCleanupRef = useRef(null)
 
-  // Persist river_id to sessionStorage
+  // River ID browser state
+  const [allRiverIds, setAllRiverIds] = useState(null) // null = not loaded
+  const [riverIdFilter, setRiverIdFilter] = useState('')
+  const [riverIdBrowserOpen, setRiverIdBrowserOpen] = useState(false)
+  const [loadingIds, setLoadingIds] = useState(false)
+
+  // Persist river_id input to sessionStorage
   useEffect(() => {
-    try { sessionStorage.setItem('rr_river_id', riverId) } catch {}
-  }, [riverId])
+    try { sessionStorage.setItem('rr_river_id', riverIdInput) } catch {}
+  }, [riverIdInput])
 
   // Listen for result_data errors on this side too (ignore comparison responses)
   useEffect(() => {
@@ -128,35 +134,64 @@ export function ResultsBrowser() {
     )
   }, [ws])
 
+  // Parse comma-separated or space-separated river IDs
+  const parseRiverIds = (input) => {
+    return input.split(/[,\s]+/).map(s => s.trim()).filter(Boolean).map(Number).filter(n => !isNaN(n) && n > 0)
+  }
+
   const loadRiver = useCallback(() => {
-    if (!files.length || !riverId) return
+    const ids = parseRiverIds(riverIdInput)
+    if (!files.length || ids.length === 0) return
     setLoading(true)
     setError(null)
 
-    // Send primary request
-    ws.send({
-      type: 'read_results',
-      files,
-      river_id: Number(riverId),
-      var_river_id: config.var_river_id || undefined,
-      var_discharge: config.var_discharge || undefined,
-      source: 'primary',
-      label: primaryLabel,
+    // First ID is primary, rest are multi-river overlays
+    ids.forEach((rid, i) => {
+      ws.send({
+        type: 'read_results',
+        files,
+        river_id: rid,
+        var_river_id: config.var_river_id || undefined,
+        var_discharge: config.var_discharge || undefined,
+        source: i === 0 ? 'primary' : 'multi-river',
+        label: i === 0 ? primaryLabel : `River ${rid}`,
+      })
     })
 
     // Send comparison requests — each dataset's files opened as mfdataset
-    compDatasets.forEach((dataset) => {
-      ws.send({
-        type: 'read_results',
-        files: dataset.files,
-        river_id: Number(riverId),
-        var_river_id: config.var_river_id || undefined,
-        var_discharge: config.var_discharge || undefined,
-        source: 'comparison',
-        label: dataset.label,
+    ids.forEach((rid) => {
+      compDatasets.forEach((dataset) => {
+        ws.send({
+          type: 'read_results',
+          files: dataset.files,
+          river_id: rid,
+          var_river_id: config.var_river_id || undefined,
+          var_discharge: config.var_discharge || undefined,
+          source: 'comparison',
+          label: `${dataset.label} (${rid})`,
+        })
       })
     })
-  }, [ws, files, riverId, config, primaryLabel, compDatasets])
+  }, [ws, files, riverIdInput, config, primaryLabel, compDatasets])
+
+  // Load the list of river IDs from output files
+  const loadRiverIds = useCallback(() => {
+    if (!files.length) return
+    setLoadingIds(true)
+    ws.request(
+      { type: 'list_river_ids', files, var_river_id: config.var_river_id || undefined },
+      'river_id_list',
+      (data) => {
+        setLoadingIds(false)
+        if (data.error) {
+          setError(data.error)
+        } else {
+          setAllRiverIds(data.ids || [])
+          setRiverIdBrowserOpen(true)
+        }
+      },
+    )
+  }, [ws, files, config])
 
   const handleAddDir = useCallback(() => {
     const dirPath = compDirInput.trim()
@@ -184,23 +219,84 @@ export function ResultsBrowser() {
       {/* River ID input + Load */}
       {files.length > 0 && (
         <div style={styles.inputSection}>
-          <label style={styles.inputLabel}>River ID</label>
+          <label style={styles.inputLabel}>River IDs (comma-separated for multi-river)</label>
           <div style={styles.inputRow}>
             <input
-              type="number"
-              value={riverId}
-              onInput={(e) => setRiverId(e.target.value)}
+              type="text"
+              value={riverIdInput}
+              onInput={(e) => setRiverIdInput(e.target.value)}
               onKeyDown={(e) => e.key === 'Enter' && loadRiver()}
-              placeholder="Enter river ID"
+              placeholder="e.g. 12345 or 12345, 67890"
             />
             <button
               class="btn-primary"
               onClick={loadRiver}
-              disabled={!riverId || loading}
+              disabled={!riverIdInput.trim() || loading}
             >
               {loading ? 'Loading...' : 'Load'}
             </button>
+            <button
+              class="btn-secondary"
+              onClick={loadRiverIds}
+              disabled={loadingIds}
+              title="Browse available river IDs"
+            >
+              {loadingIds ? '...' : 'IDs'}
+            </button>
           </div>
+
+          {/* River ID Browser */}
+          {riverIdBrowserOpen && allRiverIds && (
+            <div style={styles.idBrowser}>
+              <div style={styles.idBrowserHeader}>
+                <input
+                  type="text"
+                  value={riverIdFilter}
+                  onInput={(e) => setRiverIdFilter(e.target.value)}
+                  placeholder={`Filter ${allRiverIds.length} river IDs...`}
+                  style={{ flex: 1 }}
+                />
+                <button
+                  class="btn-secondary"
+                  style={styles.removeBtn}
+                  onClick={() => setRiverIdBrowserOpen(false)}
+                >
+                  X
+                </button>
+              </div>
+              <div style={styles.idList}>
+                {allRiverIds
+                  .filter(id => !riverIdFilter || String(id).includes(riverIdFilter))
+                  .slice(0, 200)
+                  .map(id => (
+                    <button
+                      key={id}
+                      style={styles.idBtn}
+                      onClick={() => {
+                        const current = riverIdInput.trim()
+                        if (!current) {
+                          setRiverIdInput(String(id))
+                        } else {
+                          // Append if not already present
+                          const existing = parseRiverIds(current)
+                          if (!existing.includes(id)) {
+                            setRiverIdInput(current + ', ' + id)
+                          }
+                        }
+                      }}
+                    >
+                      {id}
+                    </button>
+                  ))
+                }
+                {allRiverIds.filter(id => !riverIdFilter || String(id).includes(riverIdFilter)).length > 200 && (
+                  <div style={{ padding: '4px 8px', fontSize: '12px', color: 'var(--text-muted)' }}>
+                    ...and {allRiverIds.filter(id => !riverIdFilter || String(id).includes(riverIdFilter)).length - 200} more (filter to narrow)
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
         </div>
       )}
 
@@ -336,10 +432,22 @@ export function ResultsChart() {
             source: 'comparison',
           }]
         })
+      } else if (data.source === 'multi-river') {
+        // Additional river IDs from multi-river load
+        setOverlays(prev => {
+          const color = OVERLAY_COLORS[prev.length % OVERLAY_COLORS.length]
+          return [...prev, {
+            label: data.label || `River ${data.river_id}`,
+            times: data.times,
+            discharge: data.discharge,
+            color,
+            source: 'multi-river',
+          }]
+        })
       } else {
-        // Primary data — clear only server-sourced comparison overlays, keep CSV uploads
+        // Primary data — clear server-sourced overlays, keep CSV uploads
         setResultData({ ...data, label: data.label || 'Primary' })
-        setOverlays(prev => prev.filter(o => o.source !== 'comparison'))
+        setOverlays(prev => prev.filter(o => o.source === 'csv'))
       }
     })
     return unsub
@@ -731,5 +839,38 @@ const styles = {
     fontSize: '12px',
     color: 'var(--text-muted)',
     marginTop: '2px',
+  },
+  idBrowser: {
+    marginTop: '8px',
+    border: '1px solid var(--border)',
+    borderRadius: '6px',
+    background: 'var(--bg-surface)',
+    overflow: 'hidden',
+  },
+  idBrowserHeader: {
+    display: 'flex',
+    gap: '6px',
+    padding: '6px',
+    borderBottom: '1px solid var(--border)',
+  },
+  idList: {
+    maxHeight: '200px',
+    overflowY: 'auto',
+    padding: '4px',
+    display: 'flex',
+    flexWrap: 'wrap',
+    gap: '4px',
+    alignContent: 'flex-start',
+  },
+  idBtn: {
+    background: 'var(--bg-elevated)',
+    border: '1px solid var(--border)',
+    borderRadius: '4px',
+    padding: '2px 8px',
+    fontSize: '13px',
+    fontFamily: 'ui-monospace, "SF Mono", Menlo, Monaco, monospace',
+    color: 'var(--text-primary)',
+    cursor: 'pointer',
+    lineHeight: '1.6',
   },
 }

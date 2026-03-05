@@ -2,31 +2,11 @@ import { useState, useContext } from 'preact/hooks'
 import { WsContext, WorkdirContext, RunContext } from '../app.jsx'
 import { FileBrowser } from './FileBrowser.jsx'
 
-const PlayIcon = () => (
-  <svg width="16" height="16" viewBox="0 0 16 16">
-    <circle cx="8" cy="8" r="8" fill="#16a34a" />
-    <polygon points="6,4 6,12 12,8" fill="#fff" />
-  </svg>
-)
-
-const StopIcon = () => (
-  <svg width="16" height="16" viewBox="0 0 16 16">
-    <circle cx="8" cy="8" r="8" fill="#dc2626" />
-    <rect x="5" y="5" width="6" height="6" rx="0.5" fill="#fff" />
-  </svg>
-)
-
-const CheckIcon = () => (
-  <svg width="16" height="16" viewBox="0 0 16 16">
-    <circle cx="8" cy="8" r="8" fill="#2563eb" />
-    <polyline points="4.5,8.5 7,11 11.5,5.5" fill="none" stroke="#fff" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" />
-  </svg>
-)
-
 const PAGES = [
   { key: 'config', label: 'Config' },
   { key: 'run', label: 'Run Simulation' },
   { key: 'results', label: 'Results' },
+  { key: 'validation', label: 'Validation' },
 ]
 
 export function TopBar({ connected, activePage, onNavigate, resetAll, darkMode, onToggleDark }) {
@@ -84,28 +64,15 @@ export function TopBar({ connected, activePage, onNavigate, resetAll, darkMode, 
       )}
 
       <nav style={styles.nav}>
-        {PAGES.map(p => {
-          const isActive = activePage === p.key
-          const isRun = p.key === 'run'
-          const isRunning = runCtx.status === 'running' || runCtx.status === 'validating'
-          const isComplete = runCtx.status === 'complete'
-          const showIndicator = isRun && (isRunning || isComplete)
-          return (
-            <div key={p.key} style={styles.navItemGroup}>
-              <button
-                onClick={() => onNavigate(p.key)}
-                style={{ ...styles.navBtn, ...(isActive ? styles.navActive : {}) }}
-              >
-                {p.label}
-              </button>
-              {showIndicator && (
-                <span style={styles.runIndicator}>
-                  {isRunning ? <StopIcon /> : <CheckIcon />}
-                </span>
-              )}
-            </div>
-          )
-        })}
+        {PAGES.map(p => (
+          <button
+            key={p.key}
+            onClick={() => onNavigate(p.key)}
+            style={{ ...styles.navBtn, ...(activePage === p.key ? styles.navActive : {}) }}
+          >
+            {p.label}
+          </button>
+        ))}
       </nav>
 
       <div style={styles.right}>
@@ -182,7 +149,7 @@ const styles = {
     gap: '16px',
   },
   brand: {
-    fontSize: '15px',
+    fontSize: '20px',
     fontWeight: '600',
     color: 'var(--text-primary)',
     whiteSpace: 'nowrap',
@@ -209,16 +176,6 @@ const styles = {
   navActive: {
     background: 'var(--accent)',
     color: '#fff',
-  },
-  navItemGroup: {
-    display: 'flex',
-    alignItems: 'center',
-    gap: '6px',
-  },
-  runIndicator: {
-    display: 'flex',
-    alignItems: 'center',
-    lineHeight: 0,
   },
   right: {
     marginLeft: 'auto',

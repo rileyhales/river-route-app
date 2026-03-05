@@ -4,7 +4,7 @@ import traceback
 from starlette.websockets import WebSocket
 
 from .browser import browse_directory
-from .results import read_result_data
+from .results import read_result_data, list_river_ids, validate_results
 from .runner import sim_state, run_simulation
 
 
@@ -76,6 +76,25 @@ async def handle_ws_message(websocket: WebSocket, data: dict) -> None:
                 result['files'] = files
             if directory:
                 result['directory'] = directory
+            await websocket.send_json(_tag(result))
+
+        elif msg_type == 'list_river_ids':
+            files = data.get('files', [])
+            result = list_river_ids(files, var_river_id=data.get('var_river_id'))
+            await websocket.send_json(_tag(result))
+
+        elif msg_type == 'validate_results':
+            sim_files = data.get('sim_files', [])
+            ref_files = data.get('ref_files', [])
+            result = validate_results(
+                sim_files=sim_files,
+                ref_files=ref_files,
+                river_ids=data.get('river_ids'),
+                var_river_id=data.get('var_river_id'),
+                var_discharge=data.get('var_discharge'),
+                ref_csv=data.get('ref_csv'),
+                csv_river_id=int(data['csv_river_id']) if data.get('csv_river_id') is not None else None,
+            )
             await websocket.send_json(_tag(result))
 
         elif msg_type == 'set_workdir':
