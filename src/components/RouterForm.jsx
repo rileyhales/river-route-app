@@ -18,7 +18,7 @@ const MUSKINGUM_FIELDS = [
 
 const LATERAL_MODE_FIELDS = {
   catchment: [
-    { key: 'catchment_runoff_files', label: 'Catchment Runoff Files', type: 'multifile', required: true, hint: 'netCDF files with per-catchment runoff' },
+    { key: 'qlateral_files', label: 'Lateral Inflow Files', type: 'multifile', required: true, hint: 'netCDF files with per-catchment lateral inflow (qlateral)' },
   ],
   grid: [
     { key: 'grid_runoff_files', label: 'Runoff Grid Files', type: 'multifile', required: true, hint: 'netCDF gridded runoff depth files' },
@@ -50,8 +50,7 @@ const ADVANCED_FIELDS = [
   { key: 'var_x', label: 'X Variable', type: 'text', placeholder: 'x' },
   { key: 'var_y', label: 'Y Variable', type: 'text', placeholder: 'y' },
   { key: 'var_t', label: 'Time Variable', type: 'text', placeholder: 'time' },
-  { key: 'var_catchment_runoff_variable', label: 'Catchment Runoff Variable', type: 'text', placeholder: 'runoff' },
-  { key: 'var_runoff_depth', label: 'Runoff Depth Variable', type: 'text', placeholder: 'ro' },
+  { key: 'var_grid_runoff', label: 'Grid Runoff Variable', type: 'text', placeholder: 'ro' },
   { key: 'log_level', label: 'Log Level', type: 'select', options: ['DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL'] },
 ]
 
@@ -76,14 +75,14 @@ export const VALID_KEYS = {
     'params_file', 'channel_state_init_file', 'channel_state_final_file',
     'discharge_dir', 'discharge_files',
     // input data
-    'catchment_runoff_files', 'grid_runoff_files', 'grid_weights_file',
+    'qlateral_files', 'grid_runoff_files', 'grid_weights_file',
     // time (all optional for Rapid — NO start_datetime per docs)
     'dt_routing', 'dt_runoff', 'dt_discharge', 'dt_total',
     // processing
     'runoff_processing_mode', 'grid_accumulation_type',
     // variable names (all)
     'var_river_id', 'var_discharge', 'var_x', 'var_y', 'var_t',
-    'var_catchment_runoff_variable', 'var_runoff_depth', 'log_level',
+    'var_grid_runoff', 'log_level',
   ]),
   UnitMuskingum: new Set([
     '_router',
@@ -91,7 +90,7 @@ export const VALID_KEYS = {
     'params_file', 'channel_state_init_file', 'channel_state_final_file',
     'discharge_dir', 'discharge_files',
     // input data
-    'catchment_runoff_files', 'grid_runoff_files', 'grid_weights_file',
+    'qlateral_files', 'grid_runoff_files', 'grid_weights_file',
     // unit hydrograph
     'transformer_kernel_file', 'transformer_state_init_file', 'transformer_state_final_file',
     // time (all optional — NO start_datetime per docs)
@@ -100,7 +99,7 @@ export const VALID_KEYS = {
     'runoff_processing_mode', 'grid_accumulation_type',
     // variable names (all)
     'var_river_id', 'var_discharge', 'var_x', 'var_y', 'var_t',
-    'var_catchment_runoff_variable', 'var_runoff_depth', 'log_level',
+    'var_grid_runoff', 'log_level',
   ]),
 }
 
@@ -136,8 +135,11 @@ function MultiFileField({ field, value, onChange }) {
   const [browserOpen, setBrowserOpen] = useState(false)
   const files = value || []
 
-  const addFile = (path) => {
-    onChange(field.key, [...files, path])
+  const addFiles = (paths) => {
+    // paths is an array from multi-select FileBrowser
+    const existing = new Set(files)
+    const newFiles = paths.filter(p => !existing.has(p))
+    if (newFiles.length > 0) onChange(field.key, [...files, ...newFiles])
   }
   const removeFile = (idx) => {
     onChange(field.key, files.filter((_, i) => i !== idx))
@@ -157,13 +159,21 @@ function MultiFileField({ field, value, onChange }) {
           </button>
         </div>
       ))}
-      <button class="btn-secondary" onClick={() => setBrowserOpen(true)} style={{ marginTop: '4px' }}>
-        + Add File
-      </button>
+      <div style={{ display: 'flex', gap: '8px', marginTop: '4px' }}>
+        <button class="btn-secondary" onClick={() => setBrowserOpen(true)}>
+          + Add Files
+        </button>
+        {files.length > 0 && (
+          <button class="btn-secondary" onClick={() => onChange(field.key, [])} style={{ padding: '6px 14px', fontSize: '13px' }}>
+            Clear All
+          </button>
+        )}
+      </div>
       <FileBrowser
         open={browserOpen}
         mode="file"
-        onSelect={addFile}
+        multiSelect
+        onSelect={addFiles}
         onClose={() => setBrowserOpen(false)}
       />
       {field.hint && <div style={{ fontSize: '12px', color: 'var(--text-muted)', marginTop: '4px' }}>{field.hint}</div>}
@@ -226,7 +236,7 @@ function FieldGroup({ title, fields, config, onChange }) {
 }
 
 function inferLateralMode(config) {
-  const hasCatchment = config.catchment_runoff_files && config.catchment_runoff_files.length > 0
+  const hasCatchment = config.qlateral_files && config.qlateral_files.length > 0
   const hasGrid = (config.grid_runoff_files && config.grid_runoff_files.length > 0) || config.grid_weights_file
   if (hasCatchment) return 'catchment'
   if (hasGrid) return 'grid'
@@ -242,7 +252,7 @@ export function RouterForm({ router, config, onChange }) {
   // Update lateral mode when config changes (e.g. JSON loaded)
   useEffect(() => {
     setLateralMode(inferLateralMode(config))
-  }, [config.catchment_runoff_files, config.grid_runoff_files, config.grid_weights_file])
+  }, [config.qlateral_files, config.grid_runoff_files, config.grid_weights_file])
   const isTransform = router === 'RapidMuskingum' || router === 'UnitMuskingum'
 
   return (

@@ -333,12 +333,13 @@ export function ResultsChart() {
             times: data.times,
             discharge: data.discharge,
             color,
+            source: 'comparison',
           }]
         })
       } else {
-        // Primary data — clear overlays, store label
+        // Primary data — clear only server-sourced comparison overlays, keep CSV uploads
         setResultData({ ...data, label: data.label || 'Primary' })
-        setOverlays([])
+        setOverlays(prev => prev.filter(o => o.source !== 'comparison'))
       }
     })
     return unsub
@@ -355,7 +356,7 @@ export function ResultsChart() {
       reader.onload = () => {
         setOverlays(prev => {
           const overlay = parseCSV(reader.result, file.name.replace('.csv', ''), prev.length + fileIdx)
-          if (overlay) return [...prev, overlay]
+          if (overlay) return [...prev, { ...overlay, source: 'csv' }]
           return prev
         })
       }

@@ -15,6 +15,18 @@ export const RunContext = createContext(null)
 
 export function App() {
   const ws = useWebSocket()
+  const [darkMode, setDarkMode] = useState(() => {
+    try {
+      const saved = localStorage.getItem('rr_dark_mode')
+      return saved !== null ? saved === 'true' : true // default dark
+    } catch { return true }
+  })
+
+  useEffect(() => {
+    document.documentElement.setAttribute('data-theme', darkMode ? 'dark' : 'light')
+    try { localStorage.setItem('rr_dark_mode', String(darkMode)) } catch {}
+  }, [darkMode])
+
   const [config, setConfig] = useState(() => {
     try {
       const saved = localStorage.getItem('rr_config')
@@ -198,12 +210,14 @@ export function App() {
       <ConfigContext.Provider value={{ config, setConfig }}>
         <WorkdirContext.Provider value={{ workdir, setWorkdir }}>
           <RunContext.Provider value={runCtx}>
-            <TopBar connected={ws.connected} activePage={page} onNavigate={setPage} resetAll={resetAll} />
+            <TopBar connected={ws.connected} activePage={page} onNavigate={setPage} resetAll={resetAll} darkMode={darkMode} onToggleDark={() => setDarkMode(d => !d)} />
             <div style={styles.main}>
               <div style={styles.left}>
                 {page === 'config' && <ConfigPage onNavigate={setPage} />}
                 {page === 'run' && <RunControls />}
-                {page === 'results' && <ResultsBrowser />}
+                <div style={{ display: page === 'results' ? 'flex' : 'none', flex: 1, overflow: 'hidden', minWidth: 0 }}>
+                  <ResultsBrowser />
+                </div>
               </div>
               <div style={{
                 ...styles.right,
@@ -211,7 +225,9 @@ export function App() {
               }}>
                 {page === 'config' && <CodePreview />}
                 {page === 'run' && <RunLogs />}
-                {page === 'results' && <ResultsChart />}
+                <div style={{ display: page === 'results' ? 'flex' : 'none', flex: 1, overflow: 'hidden', minWidth: 0 }}>
+                  <ResultsChart />
+                </div>
               </div>
             </div>
           </RunContext.Provider>

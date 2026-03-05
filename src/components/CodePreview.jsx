@@ -19,8 +19,8 @@ export function resolveDischargeDir(config) {
   const files = config.discharge_files
   if (!dir || (files && files.length > 0)) return config
 
-  const inputFiles = (config.catchment_runoff_files && config.catchment_runoff_files.length > 0)
-    ? config.catchment_runoff_files
+  const inputFiles = (config.qlateral_files && config.qlateral_files.length > 0)
+    ? config.qlateral_files
     : (config.grid_runoff_files && config.grid_runoff_files.length > 0)
       ? config.grid_runoff_files
       : []
@@ -55,8 +55,7 @@ function generateCode(config) {
     var_x: 'x',
     var_y: 'y',
     var_t: 'time',
-    var_catchment_runoff_variable: 'runoff',
-    var_runoff_depth: 'ro',
+    var_grid_runoff: 'ro',
     log_level: 'INFO',
     runoff_processing_mode: 'sequential',
     grid_accumulation_type: 'incremental',

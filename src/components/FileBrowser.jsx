@@ -18,7 +18,7 @@ function formatSize(bytes) {
   return `${(bytes / 1048576).toFixed(1)} MB`
 }
 
-export function FileBrowser({ open, mode, initialPath, onSelect, onClose }) {
+export function FileBrowser({ open, mode, multiSelect, initialPath, onSelect, onClose }) {
   const ws = useContext(WsContext)
   const { workdir } = useContext(WorkdirContext)
   const root = initialPath || workdir || '~'
@@ -27,6 +27,9 @@ export function FileBrowser({ open, mode, initialPath, onSelect, onClose }) {
   const [columns, setColumns] = useState([])
   const [error, setError] = useState(null)
   const [pendingCol, setPendingCol] = useState(null)
+  // Multi-select: track selected file names within a specific column
+  const [multiSelected, setMultiSelected] = useState(new Set()) // set of full paths
+  const [multiSelectCol, setMultiSelectCol] = useState(-1) // which column the selections are in
   const scrollRef = useRef(null)
   const columnsRef = useRef(columns)
   columnsRef.current = columns
@@ -105,6 +108,21 @@ export function FileBrowser({ open, mode, initialPath, onSelect, onClose }) {
       })
       browse(fullPath, colIndex + 1)
     } else {
+      if (multiSelect) {
+        // Toggle file in multi-select set
+        if (colIndex !== multiSelectCol) {
+          // Switched columns — reset selection to just this file
+          setMultiSelectCol(colIndex)
+          setMultiSelected(new Set([fullPath]))
+        } else {
+          setMultiSelected(prev => {
+            const next = new Set(prev)
+            if (next.has(fullPath)) next.delete(fullPath)
+            else next.add(fullPath)
+            return next
+          })
+        }
+      }
       // File: select it if in file mode
       if (mode !== 'directory') {
         setColumns(cols => {
@@ -125,7 +143,7 @@ export function FileBrowser({ open, mode, initialPath, onSelect, onClose }) {
     if (mode === 'directory' && entry.type === 'directory') {
       onSelect(fullPath)
       onClose()
-    } else if (mode !== 'directory' && entry.type === 'file') {
+    } else if (mode !== 'directory' && entry.type === 'file' && !multiSelect) {
       onSelect(fullPath)
       onClose()
     }
@@ -140,12 +158,19 @@ export function FileBrowser({ open, mode, initialPath, onSelect, onClose }) {
     ? `${lastCol.path}/${lastCol.selected}`
     : null
 
-  const canConfirm = mode === 'directory'
-    ? selectedEntry?.type === 'directory' || columns.length > 0
-    : selectedEntry?.type === 'file'
+  const canConfirm = multiSelect
+    ? multiSelected.size > 0
+    : mode === 'directory'
+      ? selectedEntry?.type === 'directory' || columns.length > 0
+      : selectedEntry?.type === 'file'
 
   const handleConfirm = () => {
-    if (mode === 'directory') {
+    if (multiSelect) {
+      const sorted = [...multiSelected].sort()
+      onSelect(sorted)
+      setMultiSelected(new Set())
+      setMultiSelectCol(-1)
+    } else if (mode === 'directory') {
       // If a dir is selected, use it; otherwise use the deepest browsed path
       if (selectedEntry?.type === 'directory') {
         onSelect(selectedPath)
@@ -156,6 +181,22 @@ export function FileBrowser({ open, mode, initialPath, onSelect, onClose }) {
       onSelect(selectedPath)
     }
     onClose()
+  }
+
+  // Select all files in the deepest column
+  const handleSelectAll = () => {
+    if (!lastCol) return
+    const ci = columns.length - 1
+    const allFiles = lastCol.entries
+      .filter(e => e.type === 'file')
+      .map(e => `${lastCol.path}/${e.name}`)
+    setMultiSelectCol(ci)
+    setMultiSelected(prev => {
+      // If all are already selected, deselect all
+      const allSelected = allFiles.every(f => prev.has(f))
+      if (allSelected) return new Set()
+      return new Set(allFiles)
+    })
   }
 
   // Display path — show the absolute path for the deepest column
@@ -183,7 +224,7 @@ export function FileBrowser({ open, mode, initialPath, onSelect, onClose }) {
         {/* Title bar */}
         <div style={S.titleBar}>
           <span style={S.title}>
-            {mode === 'directory' ? 'Select Directory' : 'Select File'}
+            {mode === 'directory' ? 'Select Directory' : multiSelect ? 'Select Files' : 'Select File'}
           </span>
           <form onSubmit={handlePathSubmit} style={{ flex: 1, display: 'flex' }}>
             <input
@@ -209,20 +250,23 @@ export function FileBrowser({ open, mode, initialPath, onSelect, onClose }) {
                 <div style={S.empty}>Empty</div>
               )}
               {col.entries.map(entry => {
+                const fullEntryPath = `${col.path}/${entry.name}`
                 const isSelected = col.selected === entry.name
+                const isMultiSelected = multiSelect && ci === multiSelectCol && multiSelected.has(fullEntryPath)
+                const isHighlighted = isSelected || isMultiSelected
                 const isDir = entry.type === 'directory'
                 return (
                   <div
                     key={entry.name}
                     style={{
                       ...S.row,
-                      background: isSelected ? 'var(--accent)' : undefined,
-                      color: isSelected ? '#fff' : undefined,
+                      background: isHighlighted ? 'var(--accent)' : undefined,
+                      color: isHighlighted ? '#fff' : undefined,
                     }}
                     onClick={() => handleClick(ci, entry)}
                     onDblClick={() => handleDoubleClick(ci, entry)}
-                    onMouseEnter={e => { if (!isSelected) e.currentTarget.style.background = 'var(--bg-hover)' }}
-                    onMouseLeave={e => { if (!isSelected) e.currentTarget.style.background = 'transparent' }}
+                    onMouseEnter={e => { if (!isHighlighted) e.currentTarget.style.background = 'var(--bg-hover)' }}
+                    onMouseLeave={e => { if (!isHighlighted) e.currentTarget.style.background = 'transparent' }}
                   >
                     <span style={{ ...S.name, fontWeight: isDir ? 500 : 400 }}>
                       {entry.name}
@@ -243,9 +287,24 @@ export function FileBrowser({ open, mode, initialPath, onSelect, onClose }) {
 
         {/* Footer */}
         <div style={S.footer}>
+          {multiSelect && (
+            <>
+              <button class="btn-secondary" onClick={handleSelectAll}>
+                Select All
+              </button>
+              {multiSelected.size > 0 && (
+                <span style={{ fontSize: '13px', color: 'var(--text-secondary)' }}>
+                  {multiSelected.size} file{multiSelected.size !== 1 ? 's' : ''} selected
+                </span>
+              )}
+            </>
+          )}
+          <div style={{ flex: 1 }} />
           <button class="btn-secondary" onClick={onClose}>Cancel</button>
           <button class="btn-primary" onClick={handleConfirm} disabled={!canConfirm}>
-            Select
+            {multiSelect && multiSelected.size > 0
+              ? `Add ${multiSelected.size} File${multiSelected.size !== 1 ? 's' : ''}`
+              : 'Select'}
           </button>
         </div>
       </div>
