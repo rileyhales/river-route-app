@@ -1,190 +1,476 @@
-import { useContext, useState, useEffect } from 'preact/hooks'
-import { WsContext, ConfigContext, RunContext } from '../app.jsx'
+import { useContext, useState, useRef } from 'preact/hooks'
+import { WsContext, QueueContext, ConfigContext, prepareJobConfig } from '../app.jsx'
 import { ProgressPanel } from '../components/ProgressPanel.jsx'
 
+const STATUS_COLORS = {
+  pending: { bg: 'rgba(163,163,163,0.12)', color: 'var(--text-muted)', label: 'Pending' },
+  running: { bg: 'rgba(217,119,6,0.12)', color: 'var(--warning)', label: 'Running' },
+  complete: { bg: 'rgba(5,150,105,0.12)', color: 'var(--success)', label: 'Complete' },
+  error: { bg: 'rgba(220,38,38,0.12)', color: 'var(--error)', label: 'Error' },
+  cancelled: { bg: 'rgba(220,38,38,0.08)', color: 'var(--text-muted)', label: 'Cancelled' },
+}
+
 const formatElapsed = (seconds) => {
+  if (seconds == null) return ''
   if (seconds < 60) return `${seconds.toFixed(1)}s`
   const min = Math.floor(seconds / 60)
   const sec = (seconds % 60).toFixed(1)
   return `${min}m ${sec}s`
 }
 
-const formatDatetime = (date) => {
-  if (!date) return '--'
-  const Y = date.getFullYear()
-  const M = String(date.getMonth() + 1).padStart(2, '0')
-  const D = String(date.getDate()).padStart(2, '0')
-  const h = String(date.getHours()).padStart(2, '0')
-  const m = String(date.getMinutes()).padStart(2, '0')
-  const s = String(date.getSeconds()).padStart(2, '0')
-  return `${Y}-${M}-${D} ${h}:${m}:${s}`
+function StatusBadge({ status }) {
+  const s = STATUS_COLORS[status] || STATUS_COLORS.pending
+  return (
+    <span style={{
+      fontSize: '12px',
+      fontWeight: '600',
+      color: s.color,
+      background: s.bg,
+      padding: '2px 8px',
+      borderRadius: '4px',
+      whiteSpace: 'nowrap',
+    }}>
+      {s.label}
+    </span>
+  )
 }
 
-function useElapsedTimer(startedAt, finishedAt, isRunning) {
-  const [elapsed, setElapsed] = useState(0)
-  useEffect(() => {
-    if (!startedAt) { setElapsed(0); return }
-    if (finishedAt) {
-      setElapsed((finishedAt - startedAt) / 1000)
-      return
-    }
-    if (!isRunning) return
-    const tick = () => setElapsed((Date.now() - startedAt.getTime()) / 1000)
-    tick()
-    const id = setInterval(tick, 1000)
-    return () => clearInterval(id)
-  }, [startedAt, finishedAt, isRunning])
-  return elapsed
-}
-
-/** Left column: error block + ProgressPanel (full height) */
-export function RunLogs() {
-  const run = useContext(RunContext)
-  const hasOutput = run.status !== 'idle' || run.logs.length > 0
+function JobRow({ job, isSelected, onSelect, onRemove, onCancel, onRequeue }) {
+  const isActive = job.status === 'running'
+  const isTerminal = job.status === 'complete' || job.status === 'error' || job.status === 'cancelled'
 
   return (
-    <div style={styles.column}>
-      {run.errors.length > 0 && (
-        <div style={styles.errorBlock}>
-          <div style={styles.errorTitle}>Errors</div>
-          <ul style={styles.errorList}>
-            {run.errors.map((err, i) => <li key={i}>{err}</li>)}
-          </ul>
+    <div
+      onClick={() => onSelect(job.id)}
+      style={{
+        display: 'flex',
+        alignItems: 'center',
+        gap: '10px',
+        padding: '10px 12px',
+        background: isSelected ? 'var(--bg-elevated)' : 'transparent',
+        borderLeft: isSelected ? '3px solid var(--accent)' : '3px solid transparent',
+        cursor: 'pointer',
+        borderBottom: '1px solid var(--border)',
+        transition: 'background 0.1s',
+      }}
+    >
+      {/* Progress ring for running jobs */}
+      {isActive && (
+        <div style={{ position: 'relative', width: 28, height: 28, flexShrink: 0 }}>
+          <svg width="28" height="28" viewBox="0 0 28 28">
+            <circle cx="14" cy="14" r="11" fill="none" stroke="var(--border)" strokeWidth="3" />
+            <circle cx="14" cy="14" r="11" fill="none" stroke="var(--warning)" strokeWidth="3"
+              strokeDasharray={`${(job.percent / 100) * 69.1} 69.1`}
+              strokeLinecap="round"
+              transform="rotate(-90 14 14)"
+            />
+          </svg>
+          <span style={{
+            position: 'absolute',
+            inset: 0,
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            fontSize: '8px',
+            fontWeight: '700',
+            color: 'var(--warning)',
+          }}>
+            {Math.round(job.percent)}
+          </span>
         </div>
       )}
 
-      {hasOutput ? (
-        <div style={styles.progressSection}>
-          <ProgressPanel percent={run.percent} logs={run.logs} status={run.status} />
+      {!isActive && (
+        <div style={{
+          width: 28,
+          height: 28,
+          flexShrink: 0,
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+        }}>
+          {job.status === 'complete' && (
+            <svg width="20" height="20" viewBox="0 0 16 16">
+              <circle cx="8" cy="8" r="8" fill="var(--success)" opacity="0.15" />
+              <polyline points="4.5,8.5 7,11 11.5,5.5" fill="none" stroke="var(--success)" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+            </svg>
+          )}
+          {job.status === 'error' && (
+            <svg width="20" height="20" viewBox="0 0 16 16">
+              <circle cx="8" cy="8" r="8" fill="var(--error)" opacity="0.15" />
+              <line x1="5.5" y1="5.5" x2="10.5" y2="10.5" stroke="var(--error)" strokeWidth="1.8" strokeLinecap="round" />
+              <line x1="10.5" y1="5.5" x2="5.5" y2="10.5" stroke="var(--error)" strokeWidth="1.8" strokeLinecap="round" />
+            </svg>
+          )}
+          {job.status === 'pending' && (
+            <svg width="20" height="20" viewBox="0 0 16 16">
+              <circle cx="8" cy="8" r="7" fill="none" stroke="var(--text-muted)" strokeWidth="1.5" opacity="0.3" />
+              <circle cx="8" cy="8" r="2" fill="var(--text-muted)" opacity="0.3" />
+            </svg>
+          )}
+          {job.status === 'cancelled' && (
+            <svg width="20" height="20" viewBox="0 0 16 16">
+              <circle cx="8" cy="8" r="7" fill="none" stroke="var(--text-muted)" strokeWidth="1.5" opacity="0.2" />
+              <line x1="5" y1="8" x2="11" y2="8" stroke="var(--text-muted)" strokeWidth="1.8" strokeLinecap="round" opacity="0.3" />
+            </svg>
+          )}
         </div>
-      ) : run.errors.length === 0 && (
-        <div style={styles.emptyState}>
-          <div style={styles.emptyText}>Run a simulation to see logs here</div>
+      )}
+
+      <div style={{ flex: 1, minWidth: 0 }}>
+        <div style={{
+          fontSize: '14px',
+          fontWeight: '600',
+          color: 'var(--text-primary)',
+          overflow: 'hidden',
+          textOverflow: 'ellipsis',
+          whiteSpace: 'nowrap',
+        }}>
+          {job.name}
         </div>
+        <div style={{
+          fontSize: '12px',
+          color: 'var(--text-muted)',
+          display: 'flex',
+          alignItems: 'center',
+          gap: '8px',
+          marginTop: '2px',
+        }}>
+          <span>{job.router}</span>
+          {job.result?.elapsed != null && (
+            <span>{formatElapsed(job.result.elapsed)}</span>
+          )}
+          {job.result?.num_rivers != null && (
+            <span>{job.result.num_rivers.toLocaleString()} rivers</span>
+          )}
+        </div>
+      </div>
+
+      <StatusBadge status={job.status} />
+
+      {/* Action button */}
+      {isActive && (
+        <button
+          onClick={(e) => { e.stopPropagation(); onCancel(job.id) }}
+          style={styles.rowBtn}
+          title="Cancel"
+        >
+          <svg width="14" height="14" viewBox="0 0 16 16">
+            <rect x="3" y="3" width="10" height="10" rx="1" fill="var(--error)" />
+          </svg>
+        </button>
+      )}
+      {(job.status === 'error' || job.status === 'cancelled') && (
+        <button
+          onClick={(e) => { e.stopPropagation(); onRequeue(job.id) }}
+          style={styles.rowBtn}
+          title="Requeue"
+        >
+          <svg width="14" height="14" viewBox="0 0 16 16">
+            <path d="M4.5,4 A4.5,4.5 0 1,1 4.5,12" fill="none" stroke="var(--warning)" strokeWidth="2" strokeLinecap="round" />
+            <polygon points="4.5,1.5 4.5,6.5 2,4" fill="var(--warning)" />
+          </svg>
+        </button>
+      )}
+      {(job.status === 'pending' || isTerminal) && (
+        <button
+          onClick={(e) => { e.stopPropagation(); onRemove(job.id) }}
+          style={styles.rowBtn}
+          title="Remove"
+        >
+          <svg width="14" height="14" viewBox="0 0 16 16">
+            <line x1="4" y1="4" x2="12" y2="12" stroke="var(--text-muted)" strokeWidth="2" strokeLinecap="round" />
+            <line x1="12" y1="4" x2="4" y2="12" stroke="var(--text-muted)" strokeWidth="2" strokeLinecap="round" />
+          </svg>
+        </button>
       )}
     </div>
   )
 }
 
-/** Right column: Run/Cancel, status badge, stat cards, output file list */
-export function RunControls() {
+/** Left panel: Queue management */
+export function QueuePanel() {
   const ws = useContext(WsContext)
   const { config } = useContext(ConfigContext)
-  const run = useContext(RunContext)
-  const isRunning = run.status === 'running' || run.status === 'validating'
-  const isComplete = run.status === 'complete'
-  const isTerminal = run.status === 'complete' || run.status === 'cancelled' || run.status === 'error'
-  const elapsed = useElapsedTimer(run.startedAt, run.finishedAt, isRunning)
+  const q = useContext(QueueContext)
+  const fileInputRef = useRef(null)
+  const [dragOver, setDragOver] = useState(false)
+
+  const hasJobs = q.jobs.length > 0
+  const hasPending = q.jobs.some(j => j.status === 'pending')
+  const hasRunning = q.jobs.some(j => j.status === 'running')
+  const hasFinished = q.jobs.some(j => j.status === 'complete' || j.status === 'error' || j.status === 'cancelled')
+  const completeCount = q.jobs.filter(j => j.status === 'complete').length
+  const errorCount = q.jobs.filter(j => j.status === 'error').length
+  const runningCount = q.jobs.filter(j => j.status === 'running').length
+  const pendingCount = q.jobs.filter(j => j.status === 'pending').length
+
+  const loadConfigFiles = (files) => {
+    const fileList = Array.from(files).filter(f => f.name.endsWith('.json'))
+    if (!fileList.length) return
+
+    const items = []
+    let loaded = 0
+
+    fileList.forEach((file) => {
+      const reader = new FileReader()
+      reader.onload = (ev) => {
+        try {
+          const rawConfig = JSON.parse(ev.target.result)
+          const { router, config: cleaned } = prepareJobConfig(rawConfig)
+          const name = file.name.replace(/\.json$/i, '')
+          items.push({ name, router, config: cleaned })
+        } catch {
+          // Skip invalid files
+        }
+        loaded++
+        if (loaded === fileList.length && items.length > 0) {
+          items.sort((a, b) => a.name.localeCompare(b.name))
+          q.addToQueue(items)
+        }
+      }
+      reader.readAsText(file)
+    })
+  }
+
+  const handleUploadConfigs = () => {
+    fileInputRef.current?.click()
+  }
+
+  const handleFilesSelected = (e) => {
+    loadConfigFiles(e.target.files)
+    e.target.value = ''
+  }
+
+  const handleDrop = (e) => {
+    e.preventDefault()
+    setDragOver(false)
+    if (e.dataTransfer?.files?.length) loadConfigFiles(e.dataTransfer.files)
+  }
+  const handleDragOver = (e) => { e.preventDefault(); setDragOver(true) }
+  const handleDragLeave = (e) => { e.preventDefault(); setDragOver(false) }
+
+  const handleAddCurrent = () => {
+    q.addCurrentConfig(false)
+  }
+
+  const handleRunAll = () => {
+    if (hasPending) {
+      q.runQueue()
+    }
+  }
+
+  return (
+    <div
+      style={{ ...styles.column, ...(dragOver ? styles.dropActive : {}) }}
+      onDrop={handleDrop}
+      onDragOver={handleDragOver}
+      onDragLeave={handleDragLeave}
+    >
+      <input
+        ref={fileInputRef}
+        type="file"
+        accept=".json"
+        multiple
+        style={{ display: 'none' }}
+        onChange={handleFilesSelected}
+      />
+
+      {/* Header */}
+      <div style={{ flexShrink: 0, marginBottom: '16px' }}>
+        <h1 class="page-title">Run Queue</h1>
+        <p class="page-subtitle">
+          {hasJobs
+            ? `${q.jobs.length} job${q.jobs.length !== 1 ? 's' : ''}` +
+              (runningCount ? ` \u2022 ${runningCount} running` : '') +
+              (pendingCount ? ` \u2022 ${pendingCount} pending` : '') +
+              (completeCount ? ` \u2022 ${completeCount} done` : '') +
+              (errorCount ? ` \u2022 ${errorCount} failed` : '')
+            : 'Add configs to the queue and run them'}
+        </p>
+      </div>
+
+      {/* Controls bar */}
+      <div style={styles.controlBar}>
+        <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
+          <button class="btn-secondary" onClick={handleUploadConfigs}>
+            Upload Configs
+          </button>
+          <button class="btn-secondary" onClick={handleAddCurrent}>
+            Add Current Config
+          </button>
+        </div>
+        <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
+          {!hasRunning && hasPending && (
+            <button class="btn-primary" onClick={handleRunAll}>
+              Run All
+            </button>
+          )}
+          {hasRunning && (
+            <button class="btn-danger" onClick={q.cancelAll}>
+              Cancel All
+            </button>
+          )}
+          {hasFinished && !hasRunning && (
+            <button class="btn-secondary" onClick={q.clearFinished}>
+              Clear Finished
+            </button>
+          )}
+          {hasJobs && !hasRunning && (
+            <button class="btn-secondary" onClick={q.clearAll}>
+              Clear All
+            </button>
+          )}
+        </div>
+      </div>
+
+      {/* Concurrency selector */}
+      <div style={styles.concurrencyBar}>
+        <span style={{ fontSize: '13px', color: 'var(--text-secondary)', fontWeight: '600' }}>
+          Parallel Workers:
+        </span>
+        <div style={{ display: 'flex', gap: '4px' }}>
+          {[1, 2, 3, 4, 5].map(n => (
+            <button
+              key={n}
+              onClick={() => q.changeMaxWorkers(n)}
+              style={{
+                width: '32px',
+                height: '28px',
+                borderRadius: '4px',
+                border: 'none',
+                fontSize: '14px',
+                fontWeight: '600',
+                cursor: 'pointer',
+                fontFamily: 'inherit',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                lineHeight: '1',
+                padding: '0',
+                background: n === q.maxWorkers ? 'var(--accent)' : 'var(--bg-elevated)',
+                color: n === q.maxWorkers ? '#fff' : 'var(--text-secondary)',
+                transition: 'all 0.1s',
+              }}
+            >
+              {n}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {/* Job list */}
+      <div style={styles.jobList}>
+        {q.jobs.length === 0 && (
+          <div style={styles.emptyState}>
+            <div style={{ fontSize: '36px', marginBottom: '12px', opacity: 0.3 }}>
+              <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+                <polyline points="14 2 14 8 20 8" />
+                <line x1="12" y1="18" x2="12" y2="12" />
+                <line x1="9" y1="15" x2="15" y2="15" />
+              </svg>
+            </div>
+            <div style={{ fontSize: '15px', color: 'var(--text-muted)', marginBottom: '8px' }}>
+              {dragOver ? 'Drop config files to add' : 'No jobs in queue'}
+            </div>
+            <div style={{ fontSize: '13px', color: 'var(--text-muted)', opacity: 0.7 }}>
+              {dragOver ? '' : 'Drag & drop config JSON files or use the buttons above'}
+            </div>
+          </div>
+        )}
+        {q.jobs.map(job => (
+          <JobRow
+            key={job.id}
+            job={job}
+            isSelected={q.selectedJobId === job.id}
+            onSelect={q.setSelectedJobId}
+            onRemove={q.removeFromQueue}
+            onCancel={q.cancelJob}
+            onRequeue={q.requeueJob}
+          />
+        ))}
+      </div>
+    </div>
+  )
+}
+
+/** Right panel: Logs for selected job */
+export function JobLogs() {
+  const q = useContext(QueueContext)
+  const ws = useContext(WsContext)
+  const selectedJob = q.jobs.find(j => j.id === q.selectedJobId)
+
+  if (!selectedJob) {
+    return (
+      <div style={styles.column}>
+        <div style={styles.emptyState}>
+          <div style={{ color: 'var(--text-muted)', fontSize: '15px' }}>
+            Select a job to view its logs
+          </div>
+        </div>
+      </div>
+    )
+  }
+
+  const hasError = selectedJob.status === 'error' && selectedJob.errorInfo
 
   return (
     <div style={styles.column}>
-      {/* Run / Cancel / Results controls */}
-      <div style={styles.controlSection}>
-        <div style={styles.controlLabel}>Simulation Controls</div>
-        <div style={styles.controlRow}>
-          <button
-            style={styles.iconActionBtn}
-            onClick={run.run}
-            disabled={isRunning || isTerminal || !ws.connected}
-            title={isTerminal ? 'Reset before re-running' : 'Run simulation'}
-          >
-            <svg width="28" height="28" viewBox="0 0 16 16">
-              <circle cx="8" cy="8" r="8" fill={(isRunning || isTerminal) ? '#a3a3a3' : '#16a34a'} />
-              <polygon points="6,4 6,12 12,8" fill="#fff" />
-            </svg>
-          </button>
-          <button
-            style={styles.iconActionBtn}
-            onClick={run.cancel}
-            disabled={!isRunning}
-            title="Cancel simulation"
-          >
-            <svg width="28" height="28" viewBox="0 0 16 16">
-              <circle cx="8" cy="8" r="8" fill={isRunning ? '#dc2626' : '#a3a3a3'} />
-              <rect x="5" y="5" width="6" height="6" rx="0.5" fill="#fff" />
-            </svg>
-          </button>
-          <button
-            style={styles.iconActionBtn}
-            onClick={() => {}}
-            disabled={!isComplete}
-            title={isComplete ? 'Simulation complete' : 'No results yet'}
-          >
-            <svg width="28" height="28" viewBox="0 0 16 16">
-              <circle cx="8" cy="8" r="8" fill={isComplete ? '#2563eb' : '#a3a3a3'} />
-              <polyline points="4.5,8.5 7,11 11.5,5.5" fill="none" stroke="#fff" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" />
-            </svg>
-          </button>
-          <button
-            style={styles.iconActionBtn}
-            onClick={run.clearRunState}
-            disabled={!isTerminal}
-            title={isTerminal ? 'Reset to run again' : 'No results to reset'}
-          >
-            <svg width="28" height="28" viewBox="0 0 16 16">
-              <circle cx="8" cy="8" r="8" fill={isTerminal ? '#eab308' : '#a3a3a3'} />
-              <path d="M5.5,5 A3.5,3.5 0 1,1 5.5,11" fill="none" stroke="#fff" stroke-width="1.5" stroke-linecap="round" />
-              <polygon points="5.5,3.2 5.5,6.8 3.5,5" fill="#fff" />
-            </svg>
-          </button>
-
-          {run.status === 'running' && <span style={styles.badgeRunning}>Running</span>}
-          {run.status === 'validating' && <span style={styles.badgeRunning}>Validating</span>}
-          {run.status === 'complete' && <span style={styles.badgeComplete}>Complete</span>}
-          {run.status === 'cancelled' && <span style={styles.badgeCancelled}>Cancelled</span>}
-          {run.status === 'error' && <span style={styles.badgeCancelled}>Error</span>}
+      {/* Job header */}
+      <div style={{ flexShrink: 0, marginBottom: '12px' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '10px', marginBottom: '6px' }}>
+          <span style={{ fontSize: '16px', fontWeight: '700', color: 'var(--text-primary)' }}>
+            {selectedJob.name}
+          </span>
+          <StatusBadge status={selectedJob.status} />
+        </div>
+        <div style={{ fontSize: '13px', color: 'var(--text-muted)', display: 'flex', gap: '16px' }}>
+          <span>Router: <strong>{selectedJob.router}</strong></span>
+          {selectedJob.result?.elapsed != null && (
+            <span>Elapsed: <strong>{formatElapsed(selectedJob.result.elapsed)}</strong></span>
+          )}
+          {selectedJob.result?.num_rivers != null && (
+            <span>Rivers: <strong>{selectedJob.result.num_rivers.toLocaleString()}</strong></span>
+          )}
+          {selectedJob.result?.num_timesteps != null && (
+            <span>Timesteps: <strong>{selectedJob.result.num_timesteps.toLocaleString()}</strong></span>
+          )}
         </div>
       </div>
 
-      <div style={styles.infoLabel}>
-        Router: <strong>{config._router || 'Not selected'}</strong>
-      </div>
-
-      {/* Stat cards */}
-      <div style={styles.statsSection}>
-        <div style={styles.statRow}>
-          <div style={styles.stat}>
-            <div style={styles.statValue}>{formatDatetime(run.startedAt)}</div>
-            <div style={styles.statLabel}>Started</div>
-          </div>
-          <div style={styles.stat}>
-            <div style={{ ...styles.statValue, ...(isRunning ? { color: 'var(--accent-bright)' } : {}) }}>
-              {run.startedAt ? formatElapsed(elapsed) : '--'}
-            </div>
-            <div style={styles.statLabel}>Elapsed</div>
-          </div>
-          <div style={styles.stat}>
-            <div style={styles.statValue}>{formatDatetime(run.finishedAt)}</div>
-            <div style={styles.statLabel}>Finished</div>
+      {/* Error block */}
+      {hasError && (
+        <div style={styles.errorBlock}>
+          <div style={styles.errorTitle}>Error</div>
+          <div style={{ fontSize: '14px', color: '#fb7185', lineHeight: '1.5' }}>
+            {selectedJob.errorInfo.error}
           </div>
         </div>
-        <div style={{ ...styles.statRow, marginTop: '10px' }}>
-          <div style={styles.stat}>
-            <div style={styles.statValue}>{run.result?.num_rivers?.toLocaleString() ?? '--'}</div>
-            <div style={styles.statLabel}>Rivers</div>
-          </div>
-          <div style={styles.stat}>
-            <div style={styles.statValue}>{run.result?.num_timesteps?.toLocaleString() ?? '--'}</div>
-            <div style={styles.statLabel}>Timesteps</div>
-          </div>
-          <div style={styles.stat}>
-            <div style={styles.statValue}>{run.result?.output_files?.length ?? '--'}</div>
-            <div style={styles.statLabel}>Files</div>
+      )}
+
+      {/* Logs */}
+      {selectedJob.logs.length > 0 ? (
+        <div style={{ flex: 1, overflow: 'hidden', minHeight: 0 }}>
+          <ProgressPanel
+            percent={selectedJob.percent}
+            logs={selectedJob.logs}
+            status={selectedJob.status}
+          />
+        </div>
+      ) : selectedJob.status === 'pending' ? (
+        <div style={styles.emptyState}>
+          <div style={{ color: 'var(--text-muted)', fontSize: '14px' }}>
+            Waiting to start...
           </div>
         </div>
-      </div>
-
-      {/* Output file list */}
-      <div style={styles.fileSection}>
-        <div style={styles.fileSectionTitle}>Output Files</div>
-        {run.result?.output_files?.length > 0 ? (
-          run.result.output_files.map((f, i) => (
-            <div key={i} style={styles.filePath}>{f}</div>
-          ))
-        ) : (
-          <div style={styles.filePlaceholder}>No output files yet</div>
-        )}
-      </div>
+      ) : !hasError && (
+        <div style={styles.emptyState}>
+          <div style={{ color: 'var(--text-muted)', fontSize: '14px' }}>
+            No logs for this job
+          </div>
+        </div>
+      )}
     </div>
   )
 }
@@ -198,6 +484,57 @@ const styles = {
     overflow: 'hidden',
     minHeight: 0,
   },
+  dropActive: {
+    outline: '2px dashed var(--accent)',
+    outlineOffset: '-2px',
+    background: 'rgba(99, 102, 241, 0.04)',
+  },
+  controlBar: {
+    display: 'flex',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    gap: '12px',
+    flexShrink: 0,
+    marginBottom: '12px',
+  },
+  concurrencyBar: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: '12px',
+    padding: '8px 12px',
+    background: 'var(--bg-elevated)',
+    borderRadius: '6px',
+    flexShrink: 0,
+    marginBottom: '12px',
+  },
+  jobList: {
+    flex: 1,
+    overflow: 'auto',
+    borderRadius: '8px',
+    border: '1px solid var(--border)',
+    minHeight: 0,
+  },
+  emptyState: {
+    display: 'flex',
+    flexDirection: 'column',
+    alignItems: 'center',
+    justifyContent: 'center',
+    flex: 1,
+    textAlign: 'center',
+    padding: '32px',
+  },
+  rowBtn: {
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    background: 'none',
+    border: 'none',
+    padding: '4px',
+    cursor: 'pointer',
+    borderRadius: '4px',
+    opacity: 0.7,
+    flexShrink: 0,
+  },
   errorBlock: {
     background: 'rgba(251, 113, 133, 0.1)',
     border: '1px solid rgba(251, 113, 133, 0.3)',
@@ -210,144 +547,6 @@ const styles = {
     fontSize: '14px',
     fontWeight: '600',
     color: '#fb7185',
-    marginBottom: '8px',
-  },
-  errorList: {
-    margin: '0 0 0 16px',
-    color: '#fb7185',
-    fontSize: '14px',
-    lineHeight: '1.5',
-  },
-  progressSection: {
-    flex: 1,
-    display: 'flex',
-    flexDirection: 'column',
-    overflow: 'hidden',
-    minHeight: 0,
-  },
-  controlSection: {
-    marginBottom: '16px',
-    flexShrink: 0,
-  },
-  controlLabel: {
-    fontSize: '13px',
-    fontWeight: '700',
-    textTransform: 'uppercase',
-    letterSpacing: '0.6px',
-    color: 'var(--text-primary)',
-    marginBottom: '8px',
-  },
-  controlRow: {
-    display: 'flex',
-    alignItems: 'center',
-    gap: '12px',
-    padding: '12px 16px',
-    background: 'var(--bg-elevated)',
-    borderRadius: '8px',
-  },
-  iconActionBtn: {
-    display: 'flex',
-    alignItems: 'center',
-    justifyContent: 'center',
-    background: 'none',
-    border: 'none',
-    padding: '4px',
-    cursor: 'pointer',
-    borderRadius: '50%',
-    lineHeight: 0,
-    opacity: 1,
-    transition: 'opacity 0.1s',
-  },
-  infoLabel: {
-    fontSize: '15px',
-    color: 'var(--text-secondary)',
-    marginBottom: '16px',
-    flexShrink: 0,
-  },
-  badgeRunning: {
-    fontSize: '13px',
-    fontWeight: '500',
-    color: 'var(--warning)',
-    background: 'rgba(217, 119, 6, 0.1)',
-    padding: '2px 8px',
-    borderRadius: '4px',
-  },
-  badgeComplete: {
-    fontSize: '13px',
-    fontWeight: '500',
-    color: 'var(--success)',
-    background: 'rgba(5, 150, 105, 0.1)',
-    padding: '2px 8px',
-    borderRadius: '4px',
-  },
-  badgeCancelled: {
-    fontSize: '13px',
-    fontWeight: '500',
-    color: 'var(--error)',
-    background: 'rgba(220, 38, 38, 0.1)',
-    padding: '2px 8px',
-    borderRadius: '4px',
-  },
-  statsSection: {
-    flexShrink: 0,
-    marginBottom: '16px',
-  },
-  statRow: {
-    display: 'flex',
-    gap: '10px',
-  },
-  stat: {
-    flex: '1',
-    background: 'var(--bg-elevated)',
-    borderRadius: '6px',
-    padding: '10px',
-    textAlign: 'center',
-  },
-  statValue: {
-    fontSize: '17px',
-    fontWeight: '700',
-    color: 'var(--accent-bright)',
-  },
-  statLabel: {
-    fontSize: '12px',
-    color: 'var(--text-muted)',
-    marginTop: '2px',
-  },
-  fileSection: {
-    flexShrink: 0,
-    marginBottom: '16px',
-  },
-  fileSectionTitle: {
-    fontSize: '14px',
-    fontWeight: '600',
-    color: 'var(--text-muted)',
-    textTransform: 'uppercase',
-    letterSpacing: '0.5px',
-    marginBottom: '8px',
-  },
-  filePath: {
-    fontSize: '13px',
-    fontFamily: 'ui-monospace, "SF Mono", Menlo, Monaco, monospace',
-    color: 'var(--text-secondary)',
-    padding: '4px 8px',
-    background: 'var(--bg-elevated)',
-    borderRadius: '4px',
-    marginBottom: '4px',
-    wordBreak: 'break-all',
-  },
-  filePlaceholder: {
-    fontSize: '14px',
-    color: 'var(--text-muted)',
-    fontStyle: 'italic',
-  },
-  emptyState: {
-    display: 'flex',
-    alignItems: 'center',
-    justifyContent: 'center',
-    flex: 1,
-  },
-  emptyText: {
-    color: 'var(--text-muted)',
-    fontSize: '15px',
+    marginBottom: '6px',
   },
 }

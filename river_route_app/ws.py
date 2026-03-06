@@ -5,19 +5,17 @@ from starlette.websockets import WebSocket
 
 from .browser import browse_directory
 from .results import read_result_data, list_river_ids, validate_results
-from .runner import sim_state, run_simulation
+from .runner import job_manager
 
 
 async def handle_ws_message(websocket: WebSocket, data: dict) -> None:
     msg_type = data.get('type')
     req_id = data.get('_reqId')
 
-    # Per-session workdir stored on the websocket's state dict
     if not hasattr(websocket, '_workdir'):
         websocket._workdir = os.getcwd()
 
     def _tag(result: dict) -> dict:
-        """Echo _reqId back so the client can correlate responses."""
         if req_id is not None:
             result['_reqId'] = req_id
         return result
@@ -32,17 +30,70 @@ async def handle_ws_message(websocket: WebSocket, data: dict) -> None:
             result = _validate_config(data.get('config', {}))
             await websocket.send_json(_tag(result))
 
-        elif msg_type == 'run_simulation':
-            await run_simulation(data.get('router', ''), _clean_config(data.get('config', {})))
+        # ----- Job queue messages -----
 
-        elif msg_type == 'cancel_simulation':
-            if sim_state.running:
-                sim_state.cancel()
+        elif msg_type == 'submit_jobs':
+            jobs_data = data.get('jobs', [])
+            for jd in jobs_data:
+                jd['config'] = _clean_config(jd.get('config', {}))
+            ids = job_manager.submit_jobs(jobs_data)
+            await websocket.send_json(_tag({
+                'type': 'jobs_added',
+                'job_ids': ids,
+            }))
+            if data.get('autostart'):
+                await job_manager.run_queue()
+
+        elif msg_type == 'run_queue':
+            await job_manager.run_queue()
+
+        elif msg_type == 'cancel_job':
+            job_manager.cancel_job(data.get('job_id', ''))
+
+        elif msg_type == 'cancel_all':
+            job_manager.cancel_all()
+
+        elif msg_type == 'remove_job':
+            job_manager.remove_job(data.get('job_id', ''))
+            await websocket.send_json(_tag({
+                'type': 'job_removed',
+                'job_id': data.get('job_id', ''),
+            }))
+
+        elif msg_type == 'clear_finished':
+            job_manager.clear_finished()
+            await websocket.send_json(_tag(job_manager.get_snapshot()))
+
+        elif msg_type == 'clear_all':
+            job_manager.clear_all()
+            await websocket.send_json(_tag(job_manager.get_snapshot()))
+
+        elif msg_type == 'set_max_workers':
+            job_manager.set_max_workers(int(data.get('count', 1)))
+            await websocket.send_json(_tag({
+                'type': 'max_workers_set',
+                'count': job_manager.max_workers,
+            }))
+
+        elif msg_type == 'get_queue_status':
+            await websocket.send_json(_tag(job_manager.get_snapshot()))
+
+        elif msg_type == 'get_job_logs':
+            job_id = data.get('job_id', '')
+            job = job_manager.jobs.get(job_id)
+            if job:
+                await websocket.send_json(_tag({
+                    'type': 'job_logs',
+                    'job_id': job_id,
+                    'logs': job.logs,
+                }))
             else:
-                await websocket.send_json(_tag({'type': 'sim_cancelled'}))
+                await websocket.send_json(_tag({
+                    'type': 'error',
+                    'error': f'Unknown job: {job_id}',
+                }))
 
-        elif msg_type == 'get_sim_status':
-            await websocket.send_json(_tag(sim_state.get_snapshot()))
+        # ----- Results & validation (unchanged) -----
 
         elif msg_type == 'read_results':
             files = data.get('files', [])
@@ -97,6 +148,8 @@ async def handle_ws_message(websocket: WebSocket, data: dict) -> None:
             )
             await websocket.send_json(_tag(result))
 
+        # ----- Workdir -----
+
         elif msg_type == 'set_workdir':
             path = os.path.abspath(data.get('path', '') or os.getcwd())
             if os.path.isdir(path):
@@ -123,7 +176,6 @@ async def handle_ws_message(websocket: WebSocket, data: dict) -> None:
 
 
 def _clean_config(config: dict) -> dict:
-    """Strip empty/null values so the Configs dataclass gets clean kwargs."""
     cleaned = {}
     for key, val in config.items():
         if val is None or val == '':

@@ -197,21 +197,16 @@ def _compute_metrics(sim: np.ndarray, obs: np.ndarray) -> dict:
     # Percent bias
     pbias = 100 * float(np.sum(sim - obs) / np.sum(obs)) if np.sum(obs) != 0 else float('nan')
 
-    # KGE (2009)
+    # KGE 2012 — uses CV ratio (gamma) instead of variance ratio (alpha)
     r = float(np.corrcoef(sim, obs)[0, 1]) if len(sim) > 1 else float('nan')
-    alpha = float(np.std(sim) / np.std(obs)) if np.std(obs) > 0 else float('nan')
     beta = mean_sim / mean_obs if mean_obs != 0 else float('nan')
-    kge = 1 - float(np.sqrt((r - 1) ** 2 + (alpha - 1) ** 2 + (beta - 1) ** 2))
-
-    # KGE 2012 (modified) — uses CV ratio (gamma) instead of alpha
     cv_sim = float(np.std(sim) / mean_sim) if mean_sim != 0 else float('nan')
     cv_obs = float(np.std(obs) / mean_obs) if mean_obs != 0 else float('nan')
     gamma = cv_sim / cv_obs if cv_obs != 0 else float('nan')
-    kge_2012 = 1 - float(np.sqrt((r - 1) ** 2 + (gamma - 1) ** 2 + (beta - 1) ** 2))
+    kge = 1 - float(np.sqrt((r - 1) ** 2 + (gamma - 1) ** 2 + (beta - 1) ** 2))
 
     return {
         'kge': round(kge, 4),
-        'kge_2012': round(kge_2012, 4),
         'nse': round(nse, 4),
         'rmse': round(rmse, 4),
         'pbias': round(pbias, 2),

@@ -1,18 +1,16 @@
 import { useState, useContext } from 'preact/hooks'
-import { WsContext, WorkdirContext, RunContext } from '../app.jsx'
+import { WsContext, WorkdirContext, QueueContext } from '../app.jsx'
 import { FileBrowser } from './FileBrowser.jsx'
 
 const PAGES = [
   { key: 'config', label: 'Config' },
-  { key: 'run', label: 'Run Simulation' },
+  { key: 'run', label: 'Run Queue' },
   { key: 'results', label: 'Results' },
-  { key: 'validation', label: 'Validation' },
 ]
 
-export function TopBar({ connected, activePage, onNavigate, resetAll, darkMode, onToggleDark }) {
+export function TopBar({ connected, activePage, onNavigate, resetAll, darkMode, onToggleDark, hasRunningJobs }) {
   const ws = useContext(WsContext)
   const { workdir, setWorkdir } = useContext(WorkdirContext)
-  const runCtx = useContext(RunContext)
   const [dirBrowserOpen, setDirBrowserOpen] = useState(false)
   const [confirmResetOpen, setConfirmResetOpen] = useState(false)
 
@@ -21,7 +19,7 @@ export function TopBar({ connected, activePage, onNavigate, resetAll, darkMode, 
     ws.send({ type: 'set_workdir', path })
   }
 
-  const isRunning = runCtx.status === 'running' || runCtx.status === 'validating'
+  const isRunning = hasRunningJobs
 
   const handleResetConfirm = () => {
     setConfirmResetOpen(false)

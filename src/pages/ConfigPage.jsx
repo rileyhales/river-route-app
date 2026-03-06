@@ -1,5 +1,5 @@
 import { useState, useContext, useCallback } from 'preact/hooks'
-import { WsContext, ConfigContext, RunContext } from '../app.jsx'
+import { WsContext, ConfigContext, QueueContext } from '../app.jsx'
 import { resolveDischargeDir } from '../components/CodePreview.jsx'
 import { RouterForm, VALID_KEYS } from '../components/RouterForm.jsx'
 
@@ -8,11 +8,11 @@ const ROUTERS = ['Muskingum', 'RapidMuskingum', 'UnitMuskingum']
 export function ConfigPage({ onNavigate }) {
   const ws = useContext(WsContext)
   const { config, setConfig } = useContext(ConfigContext)
-  const run = useContext(RunContext)
+  const q = useContext(QueueContext)
   const [validation, setValidation] = useState(null)
   const [validating, setValidating] = useState(false)
 
-  const isRunning = run.status === 'running' || run.status === 'validating'
+  const hasRunning = q.jobs.some(j => j.status === 'running')
 
   const router = config._router || 'Muskingum'
 
@@ -68,14 +68,7 @@ export function ConfigPage({ onNavigate }) {
     URL.revokeObjectURL(url)
   }, [config])
 
-  const hasRunData = run.status !== 'idle' || run.logs.length > 0 || run.result
-
   const loadConfig = useCallback(() => {
-    if (isRunning) {
-      if (!confirm('A simulation is currently running. Loading a new config will cancel it and clear all results. Continue?')) return
-    } else if (hasRunData) {
-      if (!confirm('Loading a new config will clear run logs and results. Continue?')) return
-    }
     const input = document.createElement('input')
     input.type = 'file'
     input.accept = '.json'
@@ -86,7 +79,6 @@ export function ConfigPage({ onNavigate }) {
       reader.onload = (ev) => {
         try {
           const loaded = JSON.parse(ev.target.result)
-          run.clearRunState()
           setConfig(loaded)
           setValidation(null)
         } catch {
@@ -96,7 +88,7 @@ export function ConfigPage({ onNavigate }) {
       reader.readAsText(file)
     }
     input.click()
-  }, [setConfig, isRunning, hasRunData, run])
+  }, [setConfig])
 
   return (
     <div class="page">
@@ -106,13 +98,13 @@ export function ConfigPage({ onNavigate }) {
           <p class="page-subtitle">Configure your river routing simulation</p>
         </div>
         <div class="flex gap-8">
-          <button class="btn-secondary" onClick={loadConfig} disabled={isRunning}>Load JSON</button>
+          <button class="btn-secondary" onClick={loadConfig}>Load JSON</button>
           <button class="btn-secondary" onClick={saveConfig}>Save JSON</button>
-          <button class="btn-secondary" onClick={validate} disabled={validating || isRunning}>
+          <button class="btn-secondary" onClick={validate} disabled={validating}>
             {validating ? 'Validating...' : 'Validate'}
           </button>
-          <button class="btn-primary" onClick={() => onNavigate('run')}>
-            Run Simulation
+          <button class="btn-primary" onClick={() => { q.addCurrentConfig(false); onNavigate('run') }}>
+            Add to Queue
           </button>
         </div>
       </div>
@@ -132,13 +124,7 @@ export function ConfigPage({ onNavigate }) {
         </div>
       )}
 
-      {isRunning && (
-        <div style={{ marginBottom: '12px', fontSize: '13px', color: 'var(--text-muted)', fontStyle: 'italic' }}>
-          Configuration is locked while the simulation is running.
-        </div>
-      )}
-
-      <fieldset disabled={isRunning} style={{ border: 'none', padding: 0, margin: 0, opacity: isRunning ? 0.6 : 1 }}>
+      <fieldset style={{ border: 'none', padding: 0, margin: 0 }}>
         <div class="card">
           <div class="section">
             <div class="section-title">Router Type</div>
