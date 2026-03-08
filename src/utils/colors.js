@@ -1,1 +1,1 @@
-export const OVERLAY_COLORS = ['#f97316', '#a855f7', '#14b8a6', '#ef4444', '#eab308']
+export const OVERLAY_COLORS = ['#8b5cf6', '#60a5fa', '#a78bfa', '#38bdf8', '#818cf8']

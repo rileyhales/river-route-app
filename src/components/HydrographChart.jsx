@@ -1,13 +1,34 @@
-import { useRef, useEffect } from 'preact/hooks'
-import Plotly from 'plotly.js-dist-min'
+import { useRef, useEffect, useState } from 'preact/hooks'
 import { alignTimeSeries } from '../utils/alignTimeSeries.js'
 import { OVERLAY_COLORS } from '../utils/colors.js'
 
 export function HydrographChart({ times, discharge, riverId, overlays = [] }) {
   const containerRef = useRef(null)
+  const plotlyRef = useRef(null)
+  const [plotlyReady, setPlotlyReady] = useState(false)
+  const [plotlyError, setPlotlyError] = useState('')
 
   useEffect(() => {
-    if (!containerRef.current || !times || !discharge || times.length === 0) return
+    let alive = true
+    if (plotlyRef.current) {
+      setPlotlyReady(true)
+      return () => { alive = false }
+    }
+    import('plotly.js-dist-min')
+      .then((mod) => {
+        if (!alive) return
+        plotlyRef.current = mod.default || mod
+        setPlotlyReady(true)
+      })
+      .catch((err) => {
+        if (!alive) return
+        setPlotlyError(err?.message || 'Failed to load chart engine')
+      })
+    return () => { alive = false }
+  }, [])
+
+  useEffect(() => {
+    if (!plotlyReady || !containerRef.current || !times || !discharge || times.length === 0) return
 
     let timestamps, dataSeries
     if (overlays.length > 0) {
@@ -56,12 +77,15 @@ export function HydrographChart({ times, discharge, riverId, overlays = [] }) {
     }
 
     // Use Plotly.react to update in-place (preserves legend interaction state)
+    const Plotly = plotlyRef.current
     Plotly.react(containerRef.current, traces, layout, config)
 
     return () => {
-      if (containerRef.current) Plotly.purge(containerRef.current)
+      if (containerRef.current && plotlyRef.current) {
+        plotlyRef.current.purge(containerRef.current)
+      }
     }
-  }, [times, discharge, riverId, overlays])
+  }, [plotlyReady, times, discharge, riverId, overlays])
 
   const downloadCSV = () => {
     if (!times || !discharge) return
@@ -108,6 +132,16 @@ export function HydrographChart({ times, discharge, riverId, overlays = [] }) {
           Download CSV
         </button>
       </div>
+      {!plotlyReady && !plotlyError && (
+        <div style={{ padding: '16px', color: 'var(--text-muted)', fontSize: '14px' }}>
+          Loading chart engine...
+        </div>
+      )}
+      {plotlyError && (
+        <div style={{ padding: '16px', color: 'var(--error)', fontSize: '14px' }}>
+          {plotlyError}
+        </div>
+      )}
       <div ref={containerRef} style={{ width: '100%' }} />
     </div>
   )

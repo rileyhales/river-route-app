@@ -1,9 +1,11 @@
-import { useState, useContext, useEffect, useCallback, useRef } from 'preact/hooks'
-import { WsContext, ConfigContext } from '../app.jsx'
+import { useState, useContext, useEffect, useCallback, useRef, useMemo } from 'preact/hooks'
+import { WsContext, ConfigContext, ResultsContext } from '../app.jsx'
 import { resolveDischargeDir } from '../components/CodePreview.jsx'
 import { HydrographChart } from '../components/HydrographChart.jsx'
 import { FileBrowser } from '../components/FileBrowser.jsx'
 import { OVERLAY_COLORS } from '../utils/colors.js'
+import { parseValidationCsv } from '../utils/validationCsv.js'
+import { validateSeriesAgainstReference, isGoodValidationMetric } from '../utils/validationMetrics.js'
 
 function formatVolume(times, discharge) {
   if (!times || times.length < 2 || !discharge) return '—'
@@ -33,6 +35,10 @@ function computeStats(discharge) {
   return { min, max, mean: sum / discharge.length }
 }
 
+function formatMetric(value, digits = 3, suffix = '') {
+  return Number.isFinite(value) ? `${value.toFixed(digits)}${suffix}` : '—'
+}
+
 function MetricCard({ label, value, good }) {
   const color = good === true ? 'var(--success)'
     : good === false ? 'var(--error)'
@@ -45,17 +51,11 @@ function MetricCard({ label, value, good }) {
   )
 }
 
-function isGoodMetric(key, val) {
-  if (val === null || val === undefined || isNaN(val)) return undefined
-  if (key === 'kge' || key === 'nse') return val > 0.5
-  if (key === 'pbias') return Math.abs(val) < 25
-  return undefined
-}
-
-/** Left panel: discharge files, river IDs, reference data, comparisons, validation */
+/** Left panel: discharge files, river IDs, CSV validation dataset, and netcdf comparisons */
 export function ResultsBrowser() {
   const ws = useContext(WsContext)
   const { config } = useContext(ConfigContext)
+  const { validationData, setValidationData } = useContext(ResultsContext)
 
   // Primary discharge files
   const [files, setFiles] = useState([])
@@ -76,12 +76,8 @@ export function ResultsBrowser() {
   const [riverIdBrowserOpen, setRiverIdBrowserOpen] = useState(false)
   const [loadingIds, setLoadingIds] = useState(false)
 
-  // Reference data
-  const [refMode, setRefMode] = useState('csv') // 'netcdf' | 'csv'
-  const [refFiles, setRefFiles] = useState([])
+  // CSV validation dataset
   const [refCsvText, setRefCsvText] = useState('')
-  const [csvRiverId, setCsvRiverId] = useState('')
-  const [refBrowserOpen, setRefBrowserOpen] = useState(false)
   const csvInputRef = useRef(null)
 
   // Comparison datasets
@@ -91,18 +87,13 @@ export function ResultsBrowser() {
   const [fileBrowserOpen, setFileBrowserOpen] = useState(false)
   const scanCleanupRef = useRef(null)
 
-  // Validation
-  const [validating, setValidating] = useState(false)
-  const [validationResults, setValidationResults] = useState(null)
-  const [selectedRiver, setSelectedRiver] = useState(null)
-
   useEffect(() => {
     try { sessionStorage.setItem('rr_river_id', riverIdInput) } catch {}
   }, [riverIdInput])
 
   useEffect(() => {
     const unsub = ws.on('result_data', (data) => {
-      if (data.source === 'comparison' || data.source === 'validation-sim' || data.source === 'validation-ref') return
+      if (data.source === 'comparison') return
       setLoading(false)
       if (data.error) setError(data.error)
       else setError(null)
@@ -218,58 +209,45 @@ export function ResultsBrowser() {
     )
   }, [ws, files])
 
-  // Reference CSV upload
+  const applyCsvText = useCallback((text, sourceName = '') => {
+    const selectedIds = parseRiverIds(riverIdInput)
+    const parsed = parseValidationCsv(text, selectedIds)
+    if (!parsed.ok) {
+      setValidationData({
+        sourceName: sourceName || 'CSV',
+        parsed: null,
+        error: parsed.error,
+      })
+      setError(parsed.error)
+      return
+    }
+    setValidationData({
+      sourceName: sourceName || 'CSV',
+      parsed: parsed.parsed,
+      error: '',
+    })
+    setError(null)
+  }, [riverIdInput, setValidationData])
+
+  // Re-parse 2-column CSV against current selected river IDs when selection changes.
+  useEffect(() => {
+    if (!refCsvText.trim()) return
+    applyCsvText(refCsvText, validationData.sourceName || 'CSV')
+  }, [riverIdInput, refCsvText, validationData.sourceName, applyCsvText])
+
   const handleCsvUpload = (e) => {
     const file = e.target.files?.[0]
     if (!file) return
     const reader = new FileReader()
-    reader.onload = () => setRefCsvText(reader.result)
+    reader.onload = () => {
+      const text = String(reader.result || '')
+      const name = file.name || 'Uploaded CSV'
+      setRefCsvText(text)
+      applyCsvText(text, name)
+    }
     reader.readAsText(file)
     e.target.value = ''
   }
-
-  // Run validation
-  const runValidation = useCallback(() => {
-    if (files.length === 0) { setError('No discharge files specified'); return }
-    if (refMode === 'netcdf' && refFiles.length === 0) { setError('No reference files specified'); return }
-    if (refMode === 'csv' && !refCsvText.trim()) { setError('No CSV reference data provided'); return }
-    if (refMode === 'csv' && !csvRiverId.trim()) { setError('Enter a river ID for the CSV data'); return }
-
-    setValidating(true)
-    setError(null)
-    setValidationResults(null)
-
-    const parsedRiverIds = riverIdInput.trim()
-      ? parseRiverIds(riverIdInput)
-      : undefined
-
-    ws.request(
-      {
-        type: 'validate_results',
-        sim_files: files,
-        ref_files: refMode === 'netcdf' ? refFiles : [],
-        ref_csv: refMode === 'csv' ? refCsvText : undefined,
-        csv_river_id: refMode === 'csv' && csvRiverId ? Number(csvRiverId) : undefined,
-        river_ids: parsedRiverIds,
-      },
-      'validation_result_data',
-      (data) => {
-        setValidating(false)
-        if (data.error) setError(data.error)
-        else setValidationResults(data)
-      },
-      { timeout: 120000 },
-    )
-  }, [ws, files, refFiles, refMode, refCsvText, csvRiverId, riverIdInput])
-
-  // Load hydrograph for a river from validation table
-  const loadRiverHydrograph = useCallback((riverId) => {
-    setSelectedRiver(riverId)
-    ws.send({ type: 'read_results', files, river_id: riverId, source: 'validation-sim', label: 'Simulation' })
-    if (refMode === 'netcdf' && refFiles.length > 0) {
-      ws.send({ type: 'read_results', files: refFiles, river_id: riverId, source: 'validation-ref', label: 'Reference' })
-    }
-  }, [ws, files, refFiles, refMode])
 
   const handleAddDir = useCallback(() => {
     const dirPath = compDirInput.trim()
@@ -281,8 +259,6 @@ export function ResultsBrowser() {
   const handleBrowseSelect = useCallback((dirPath) => {
     if (dirPath) scanDirectory(dirPath)
   }, [scanDirectory])
-
-  const hasRef = (refMode === 'csv' && refCsvText.trim()) || (refMode === 'netcdf' && refFiles.length > 0)
 
   return (
     <div style={styles.column}>
@@ -380,141 +356,28 @@ export function ResultsBrowser() {
         )}
       </div>
 
-      {/* Reference / Observed Data */}
+      {/* CSV Validation Dataset */}
       <div style={styles.section}>
-        <div style={styles.sectionTitle}>Reference / Observed Data</div>
-        <div style={{ display: 'flex', gap: '8px', marginBottom: '8px' }}>
-          <button class={refMode === 'csv' ? 'btn-primary' : 'btn-secondary'} onClick={() => setRefMode('csv')}>CSV Upload</button>
-          <button class={refMode === 'netcdf' ? 'btn-primary' : 'btn-secondary'} onClick={() => setRefMode('netcdf')}>NetCDF Files</button>
+        <div style={styles.sectionTitle}>Validation Dataset (CSV)</div>
+        <div style={{ fontSize: '12px', color: 'var(--text-muted)', marginBottom: '6px' }}>
+          Expected format: `time` or `datetime` column, then one discharge column per river.
+          If there are only 2 columns, data is mapped to the single selected River ID.
         </div>
-
-        {refMode === 'csv' ? (
-          <>
-            <div style={{ fontSize: '12px', color: 'var(--text-muted)', marginBottom: '6px' }}>
-              CSV format: datetime, discharge (with header row)
-            </div>
-            <div class="form-group">
-              <label class="form-label">River ID</label>
-              <input type="number" value={csvRiverId} onInput={(e) => setCsvRiverId(e.target.value)} placeholder="River ID for this CSV" />
-            </div>
-            <button class="btn-secondary" onClick={() => csvInputRef.current?.click()}>Upload CSV</button>
-            <input ref={csvInputRef} type="file" accept=".csv" style={{ display: 'none' }} onChange={handleCsvUpload} />
-            {refCsvText && (
-              <div style={{ fontSize: '12px', color: 'var(--text-secondary)', marginTop: '4px' }}>
-                CSV loaded ({refCsvText.split('\n').length - 1} rows)
-              </div>
-            )}
-          </>
-        ) : (
-          <>
-            <div style={styles.fileList}>
-              {refFiles.map((f, i) => <div key={i} style={styles.filePath}>{f}</div>)}
-            </div>
-            <div style={{ display: 'flex', gap: '8px', marginTop: '4px' }}>
-              <button class="btn-secondary" onClick={() => setRefBrowserOpen(true)}>Browse</button>
-              {refFiles.length > 0 && (
-                <button class="btn-secondary" onClick={() => setRefFiles([])} style={{ padding: '6px 14px', fontSize: '13px' }}>Clear</button>
-              )}
-            </div>
-            <FileBrowser
-              open={refBrowserOpen}
-              mode="file"
-              multiSelect
-              onSelect={(paths) => setRefFiles(prev => {
-                const existing = new Set(prev)
-                const newFiles = paths.filter(p => !existing.has(p))
-                return newFiles.length > 0 ? [...prev, ...newFiles] : prev
-              })}
-              onClose={() => setRefBrowserOpen(false)}
-            />
-          </>
+        <div style={{ marginTop: '8px' }}>
+          <button class="btn-secondary" onClick={() => csvInputRef.current?.click()}>Upload CSV</button>
+          <input ref={csvInputRef} type="file" accept=".csv" style={{ display: 'none' }} onChange={handleCsvUpload} />
+        </div>
+        {validationData.parsed && (
+          <div style={{ fontSize: '12px', color: 'var(--text-secondary)', marginTop: '6px' }}>
+            Loaded {validationData.sourceName || 'CSV'} • {validationData.parsed.rowCount.toLocaleString()} rows • {validationData.parsed.seriesMeta.length} river series
+          </div>
         )}
-
-        {hasRef && files.length > 0 && (
-          <div style={{ marginTop: '10px' }}>
-            <button
-              class="btn-primary"
-              onClick={runValidation}
-              disabled={validating}
-              style={{ width: '100%' }}
-            >
-              {validating ? 'Computing Metrics...' : 'Validate'}
-            </button>
+        {validationData.error && (
+          <div style={{ fontSize: '12px', color: 'var(--error)', marginTop: '6px' }}>
+            {validationData.error}
           </div>
         )}
       </div>
-
-      {/* Validation results */}
-      {validationResults && (
-        <div style={{ ...styles.section, flex: 1, overflow: 'auto', minHeight: 0 }}>
-          <div style={styles.sectionTitle}>
-            Metrics — {validationResults.n_rivers} river{validationResults.n_rivers !== 1 ? 's' : ''}
-          </div>
-
-          {validationResults.results?.length > 0 && (() => {
-            const valid = validationResults.results.filter(r => !r.error)
-            if (valid.length === 0) return null
-            const avg = (key) => valid.reduce((s, r) => s + (r[key] || 0), 0) / valid.length
-            return (
-              <div style={{ marginBottom: '12px' }}>
-                <div style={{ fontSize: '13px', fontWeight: '600', color: 'var(--text-secondary)', marginBottom: '6px' }}>
-                  Average ({valid.length} rivers)
-                </div>
-                <div style={styles.statRow}>
-                  <MetricCard label="KGE" value={avg('kge').toFixed(3)} good={isGoodMetric('kge', avg('kge'))} />
-                  <MetricCard label="NSE" value={avg('nse').toFixed(3)} good={isGoodMetric('nse', avg('nse'))} />
-                  <MetricCard label="RMSE" value={avg('rmse').toFixed(2)} />
-                  <MetricCard label="% Bias" value={avg('pbias').toFixed(1) + '%'} good={isGoodMetric('pbias', avg('pbias'))} />
-                </div>
-              </div>
-            )
-          })()}
-
-          <div style={styles.tableWrap}>
-            <table style={styles.table}>
-              <thead>
-                <tr>
-                  <th style={styles.th}>River ID</th>
-                  <th style={styles.th}>KGE</th>
-                  <th style={styles.th}>NSE</th>
-                  <th style={styles.th}>RMSE</th>
-                  <th style={styles.th}>% Bias</th>
-                  <th style={styles.th}>r</th>
-                  <th style={styles.th}>N</th>
-                </tr>
-              </thead>
-              <tbody>
-                {validationResults.results?.map((r, i) => (
-                  <tr
-                    key={i}
-                    style={{
-                      ...styles.tr,
-                      background: selectedRiver === r.river_id ? 'var(--accent)' : undefined,
-                      color: selectedRiver === r.river_id ? '#fff' : undefined,
-                      cursor: r.error ? 'default' : 'pointer',
-                    }}
-                    onClick={() => !r.error && loadRiverHydrograph(r.river_id)}
-                  >
-                    <td style={styles.td}>{r.river_id}</td>
-                    {r.error ? (
-                      <td style={{ ...styles.td, color: 'var(--error)' }} colSpan={6}>{r.error}</td>
-                    ) : (
-                      <>
-                        <td style={{ ...styles.td, color: isGoodMetric('kge', r.kge) === true ? 'var(--success)' : isGoodMetric('kge', r.kge) === false ? 'var(--error)' : undefined }}>{r.kge?.toFixed(3)}</td>
-                        <td style={{ ...styles.td, color: isGoodMetric('nse', r.nse) === true ? 'var(--success)' : isGoodMetric('nse', r.nse) === false ? 'var(--error)' : undefined }}>{r.nse?.toFixed(3)}</td>
-                        <td style={styles.td}>{r.rmse?.toFixed(2)}</td>
-                        <td style={{ ...styles.td, color: isGoodMetric('pbias', r.pbias) === true ? 'var(--success)' : isGoodMetric('pbias', r.pbias) === false ? 'var(--error)' : undefined }}>{r.pbias?.toFixed(1)}%</td>
-                        <td style={styles.td}>{r.r?.toFixed(3)}</td>
-                        <td style={styles.td}>{r.n_common}</td>
-                      </>
-                    )}
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </div>
-      )}
 
       {/* Comparison Datasets */}
       <div style={styles.section}>
@@ -547,68 +410,135 @@ export function ResultsBrowser() {
 /** Right panel: hydrograph chart + stats */
 export function ResultsChart() {
   const ws = useContext(WsContext)
+  const { validationData } = useContext(ResultsContext)
   const [resultData, setResultData] = useState(null)
   const [overlays, setOverlays] = useState([])
-
-  // Validation-specific data
-  const [valSimData, setValSimData] = useState(null)
-  const [valRefData, setValRefData] = useState(null)
 
   useEffect(() => {
     const unsub = ws.on('result_data', (data) => {
       if (data.error) {
-        if (data.source !== 'comparison' && data.source !== 'validation-sim' && data.source !== 'validation-ref') {
+        if (data.source !== 'comparison') {
           setResultData(null)
         }
         return
       }
 
-      if (data.source === 'validation-sim') {
-        setValSimData(data)
-        setValRefData(null)
-      } else if (data.source === 'validation-ref') {
-        setValRefData(data)
-      } else if (data.source === 'comparison') {
+      if (data.source === 'comparison') {
         const fallbackLabel = (data.files?.[0] || '').split('/').slice(-2, -1)[0] || 'Comparison'
         setOverlays(prev => {
           const color = OVERLAY_COLORS[prev.length % OVERLAY_COLORS.length]
-          return [...prev, { label: data.label || fallbackLabel, times: data.times, discharge: data.discharge, color, source: 'comparison' }]
+          return [...prev, { label: data.label || fallbackLabel, times: data.times, discharge: data.discharge, color, source: 'comparison', riverId: data.river_id }]
         })
       } else if (data.source === 'multi-river') {
         setOverlays(prev => {
           const color = OVERLAY_COLORS[prev.length % OVERLAY_COLORS.length]
-          return [...prev, { label: data.label || `River ${data.river_id}`, times: data.times, discharge: data.discharge, color, source: 'multi-river' }]
+          return [...prev, { label: data.label || `River ${data.river_id}`, times: data.times, discharge: data.discharge, color, source: 'multi-river', riverId: data.river_id }]
         })
       } else {
         setResultData({ ...data, label: data.label || 'Primary' })
         setOverlays([])
-        setValSimData(null)
-        setValRefData(null)
       }
     })
     return unsub
   }, [ws])
 
-  const removeOverlay = (index) => setOverlays(prev => prev.filter((_, i) => i !== index))
-
-  // Show validation hydrograph if selected from table
-  if (valSimData) {
-    const valOverlays = []
-    if (valRefData) {
-      valOverlays.push({ label: 'Reference', times: valRefData.times, discharge: valRefData.discharge, color: OVERLAY_COLORS[0] })
+  const buildValidationOverlays = useCallback(() => {
+    const parsed = validationData?.parsed
+    if (!parsed || !resultData) return []
+    const overlaysOut = []
+    const used = new Set()
+    const addForRiver = (riverId, indexBase = 0) => {
+      const key = String(riverId)
+      if (used.has(key)) return
+      const discharge = parsed.seriesByRiverId[key]
+      if (!discharge) return
+      used.add(key)
+      overlaysOut.push({
+        label: `CSV ${key}`,
+        times: parsed.times,
+        discharge,
+        color: OVERLAY_COLORS[(indexBase + 2) % OVERLAY_COLORS.length],
+        source: 'csv',
+        riverId: Number(riverId),
+      })
     }
-    return (
-      <div style={{ ...styles.column, overflow: 'auto' }}>
-        <HydrographChart times={valSimData.times} discharge={valSimData.discharge} riverId={valSimData.river_id} overlays={valOverlays} />
-        <div style={styles.statRow}>
-          <MetricCard label="Sim Mean" value={valSimData.stats?.mean?.toFixed(2) ?? '—'} />
-          <MetricCard label="Sim Max" value={valSimData.stats?.max?.toFixed(2) ?? '—'} />
-          {valRefData && <MetricCard label="Ref Mean" value={valRefData.stats?.mean?.toFixed(2) ?? '—'} />}
-          {valRefData && <MetricCard label="Ref Max" value={valRefData.stats?.max?.toFixed(2) ?? '—'} />}
-        </div>
-      </div>
-    )
-  }
+    addForRiver(resultData.river_id, 0)
+    overlays.forEach((overlay, i) => {
+      if (overlay.riverId != null && overlay.source !== 'csv') {
+        addForRiver(overlay.riverId, i + 1)
+      }
+    })
+    return overlaysOut
+  }, [validationData, resultData, overlays])
+
+  const validationOverlays = buildValidationOverlays()
+  const allOverlays = [...overlays, ...validationOverlays]
+  const csvValidationRows = useMemo(() => {
+    const parsed = validationData?.parsed
+    if (!parsed) return []
+
+    const rows = []
+    const addValidationRow = (label, riverId, times, discharge) => {
+      if (riverId == null) return
+      const ref = parsed.seriesByRiverId?.[String(riverId)]
+      if (!ref) {
+        rows.push({
+          label,
+          riverId,
+          nCommon: 0,
+          error: `No CSV series for river ${riverId}`,
+        })
+        return
+      }
+      const validated = validateSeriesAgainstReference(
+        { times, discharge },
+        { times: parsed.times, discharge: ref },
+      )
+      if (!validated.ok) {
+        rows.push({
+          label,
+          riverId,
+          nCommon: validated.nCommon || 0,
+          error: validated.error,
+        })
+        return
+      }
+      rows.push({
+        label,
+        riverId,
+        nCommon: validated.nCommon,
+        ...validated.metrics,
+      })
+    }
+
+    if (resultData?.river_id != null) {
+      addValidationRow(resultData.label || 'Primary', resultData.river_id, resultData.times, resultData.discharge)
+    }
+    overlays.forEach((overlay) => {
+      if (overlay.source === 'csv' || overlay.riverId == null) return
+      addValidationRow(overlay.label || `River ${overlay.riverId}`, overlay.riverId, overlay.times, overlay.discharge)
+    })
+
+    return rows
+  }, [validationData, resultData, overlays])
+
+  const csvValidationSummary = useMemo(() => {
+    const validRows = csvValidationRows.filter(row => !row.error)
+    if (validRows.length === 0) return null
+    const average = (key) => {
+      const values = validRows.map(row => row[key]).filter(v => Number.isFinite(v))
+      if (values.length === 0) return null
+      return values.reduce((sum, value) => sum + value, 0) / values.length
+    }
+    return {
+      count: validRows.length,
+      kge: average('kge'),
+      nse: average('nse'),
+      rmse: average('rmse'),
+      pbias: average('pbias'),
+      r: average('r'),
+    }
+  }, [csvValidationRows])
 
   if (!resultData && overlays.length === 0) {
     return (
@@ -623,7 +553,7 @@ export function ResultsChart() {
   return (
     <div style={{ ...styles.column, overflow: 'auto' }}>
       {resultData ? (
-        <HydrographChart times={resultData.times} discharge={resultData.discharge} riverId={resultData.river_id} overlays={overlays} />
+        <HydrographChart times={resultData.times} discharge={resultData.discharge} riverId={resultData.river_id} overlays={allOverlays} />
       ) : (
         <HydrographChart times={overlays[0].times} discharge={overlays[0].discharge} riverId={overlays[0].label} overlays={overlays.slice(1)} />
       )}
@@ -644,7 +574,7 @@ export function ResultsChart() {
         </div>
       )}
 
-      {overlays.map((overlay, i) => {
+      {allOverlays.map((overlay, i) => {
         const s = computeStats(overlay.discharge)
         if (!s) return null
         return (
@@ -663,6 +593,74 @@ export function ResultsChart() {
           </div>
         )
       })}
+
+      {validationData?.parsed && csvValidationRows.length > 0 && (
+        <div style={styles.statsBlock}>
+          <div style={styles.statsBlockLabel}>
+            <span style={{ ...styles.colorSwatch, background: '#a78bfa' }} />
+            CSV Validation ({validationData.sourceName || 'CSV'})
+          </div>
+          {csvValidationSummary && (
+            <div style={styles.statRow}>
+              <MetricCard label="Avg KGE" value={formatMetric(csvValidationSummary.kge, 3)} good={isGoodValidationMetric('kge', csvValidationSummary.kge)} />
+              <MetricCard label="Avg NSE" value={formatMetric(csvValidationSummary.nse, 3)} good={isGoodValidationMetric('nse', csvValidationSummary.nse)} />
+              <MetricCard label="Avg RMSE" value={formatMetric(csvValidationSummary.rmse, 2)} />
+              <MetricCard label="Avg % Bias" value={formatMetric(csvValidationSummary.pbias, 1, '%')} good={isGoodValidationMetric('pbias', csvValidationSummary.pbias)} />
+              <MetricCard label="Avg r" value={formatMetric(csvValidationSummary.r, 3)} />
+            </div>
+          )}
+          <div style={styles.validationMeta}>
+            {csvValidationSummary
+              ? `Computed metrics for ${csvValidationSummary.count} series`
+              : 'No series with enough common timesteps to compute validation metrics'}
+          </div>
+          <div style={styles.validationTableWrap}>
+            <table style={styles.validationTable}>
+              <thead>
+                <tr>
+                  <th style={styles.validationTh}>Series</th>
+                  <th style={styles.validationTh}>River ID</th>
+                  <th style={styles.validationTh}>KGE</th>
+                  <th style={styles.validationTh}>NSE</th>
+                  <th style={styles.validationTh}>RMSE</th>
+                  <th style={styles.validationTh}>% Bias</th>
+                  <th style={styles.validationTh}>r</th>
+                  <th style={styles.validationTh}>N Common</th>
+                  <th style={styles.validationTh}>Status</th>
+                </tr>
+              </thead>
+              <tbody>
+                {csvValidationRows.map((row, i) => {
+                  const kgeGood = isGoodValidationMetric('kge', row.kge)
+                  const nseGood = isGoodValidationMetric('nse', row.nse)
+                  const pbiasGood = isGoodValidationMetric('pbias', row.pbias)
+                  return (
+                    <tr key={`${row.label}-${row.riverId}-${i}`}>
+                      <td style={styles.validationTd}>{row.label}</td>
+                      <td style={styles.validationTd}>{row.riverId}</td>
+                      <td style={{ ...styles.validationTd, color: kgeGood === true ? 'var(--success)' : kgeGood === false ? 'var(--error)' : undefined }}>
+                        {formatMetric(row.kge, 3)}
+                      </td>
+                      <td style={{ ...styles.validationTd, color: nseGood === true ? 'var(--success)' : nseGood === false ? 'var(--error)' : undefined }}>
+                        {formatMetric(row.nse, 3)}
+                      </td>
+                      <td style={styles.validationTd}>{formatMetric(row.rmse, 2)}</td>
+                      <td style={{ ...styles.validationTd, color: pbiasGood === true ? 'var(--success)' : pbiasGood === false ? 'var(--error)' : undefined }}>
+                        {formatMetric(row.pbias, 1, '%')}
+                      </td>
+                      <td style={styles.validationTd}>{formatMetric(row.r, 3)}</td>
+                      <td style={styles.validationTd}>{row.nCommon}</td>
+                      <td style={{ ...styles.validationTd, color: row.error ? 'var(--error)' : 'var(--success)' }}>
+                        {row.error || 'ok'}
+                      </td>
+                    </tr>
+                  )
+                })}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
     </div>
   )
 }
@@ -813,6 +811,36 @@ const styles = {
     fontSize: '12px',
     color: 'var(--text-muted)',
     marginTop: '2px',
+  },
+  validationMeta: {
+    marginTop: '8px',
+    fontSize: '12px',
+    color: 'var(--text-muted)',
+  },
+  validationTableWrap: {
+    marginTop: '8px',
+    overflowX: 'auto',
+    border: '1px solid var(--border)',
+    borderRadius: '6px',
+  },
+  validationTable: {
+    width: '100%',
+    borderCollapse: 'collapse',
+    fontSize: '12px',
+    background: 'var(--bg-elevated)',
+  },
+  validationTh: {
+    textAlign: 'left',
+    padding: '6px 8px',
+    borderBottom: '1px solid var(--border)',
+    color: 'var(--text-secondary)',
+    whiteSpace: 'nowrap',
+  },
+  validationTd: {
+    padding: '6px 8px',
+    borderBottom: '1px solid var(--border)',
+    color: 'var(--text-primary)',
+    whiteSpace: 'nowrap',
   },
   idBrowser: {
     marginTop: '8px',

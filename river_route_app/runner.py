@@ -1,103 +1,70 @@
 import asyncio
 import datetime
+import io
 import logging
+import multiprocessing as mp
+import os
 import queue
+import re
 import sys
-import threading
 import time
-import uuid
 
-from concurrent.futures import ThreadPoolExecutor
 from starlette.websockets import WebSocket
 
-
-class SimulationCancelled(Exception):
-    pass
-
-
-class StreamingTqdm:
-    """Iterator wrapper that emits progress updates to a queue, mimicking tqdm."""
-
-    def __init__(self, iterable, msg_queue: queue.Queue, cancelled: threading.Event, desc: str = '', **kwargs):
-        self._iterable = iterable
-        self._queue = msg_queue
-        self._cancelled = cancelled
-        self._desc = desc
-        self._total = len(iterable) if hasattr(iterable, '__len__') else kwargs.get('total', 0)
-        self._n = 0
-        self._last_update = 0.0
-
-    def __iter__(self):
-        for item in self._iterable:
-            if self._cancelled.is_set():
-                raise SimulationCancelled()
-            yield item
-            self._n += 1
-            now = time.monotonic()
-            if now - self._last_update >= 0.25 or self._n == self._total:
-                pct = (self._n / self._total * 100) if self._total else 0
-                self._queue.put(('progress', pct, f'{self._desc}: {self._n}/{self._total}'))
-                self._last_update = now
-
-    def __len__(self):
-        return self._total
+from .config_schema import clean_config, resolve_router_name
 
 
 class WebSocketLogHandler(logging.Handler):
     """Captures log records and puts them on a queue for WS streaming."""
 
-    def __init__(self, msg_queue: queue.Queue):
+    def __init__(self, msg_queue, job_id: str):
         super().__init__()
         self._queue = msg_queue
+        self._job_id = job_id
 
     def emit(self, record: logging.LogRecord):
-        self._queue.put(('log', record.levelname, self.format(record)))
+        self._queue.put({
+            'kind': 'log',
+            'job_id': self._job_id,
+            'level': record.levelname,
+            'message': self.format(record),
+        })
 
 
-# ---------------------------------------------------------------------------
-# Thread-local tqdm patching — applied once, routes to per-thread queues
-# ---------------------------------------------------------------------------
-_tqdm_local = threading.local()
-_tqdm_patched = False
-_original_tqdm = None
-_patch_lock = threading.Lock()
+class StderrCapture(io.TextIOBase):
+    """Captures stderr writes, parses tqdm output, and forwards progress to a queue."""
+
+    _TQDM_RE = re.compile(r'(\d+)%\|.*\|\s*(\d+)/(\d+)')
+
+    def __init__(self, msg_queue, original_stderr, job_id: str):
+        self._queue = msg_queue
+        self._original = original_stderr
+        self._job_id = job_id
+        self._last_update = 0.0
+
+    def write(self, text):
+        match = self._TQDM_RE.search(text)
+        if match:
+            pct = int(match.group(1))
+            current = match.group(2)
+            total = match.group(3)
+            now = time.monotonic()
+            if now - self._last_update >= 0.25 or pct >= 100:
+                self._queue.put({
+                    'kind': 'progress',
+                    'job_id': self._job_id,
+                    'percent': pct,
+                    'message': f'{current}/{total}',
+                })
+                self._last_update = now
+        return len(text)
+
+    def flush(self):
+        pass
 
 
-def _ensure_tqdm_patched():
-    global _tqdm_patched, _original_tqdm
-    if _tqdm_patched:
-        return
-    with _patch_lock:
-        if _tqdm_patched:
-            return
-
-        import tqdm as tqdm_module
-        _original_tqdm = tqdm_module.tqdm
-
-        def thread_aware_tqdm(iterable=None, *args, **kwargs):
-            ctx = getattr(_tqdm_local, 'ctx', None)
-            if ctx and iterable is not None:
-                return StreamingTqdm(iterable, ctx['queue'], ctx['cancelled'], desc=kwargs.get('desc', ''))
-            return _original_tqdm(iterable, *args, **kwargs)
-
-        tqdm_module.tqdm = thread_aware_tqdm
-        for mod_name, mod in sys.modules.items():
-            if mod_name.startswith('river_route') and mod is not None and hasattr(mod, 'tqdm'):
-                if getattr(mod, 'tqdm') is _original_tqdm:
-                    mod.tqdm = thread_aware_tqdm
-
-        _tqdm_patched = True
-
-
-# ---------------------------------------------------------------------------
-# Per-job execution (runs in a thread)
-# ---------------------------------------------------------------------------
-
-def _run_job(router_name: str, config: dict, msg_queue: queue.Queue, cancelled: threading.Event):
+def _run_job(job_id: str, router_name: str, config: dict, msg_queue, cancelled) -> None:
     from river_route import Muskingum, RapidMuskingum, UnitMuskingum
-
-    _ensure_tqdm_patched()
-    _tqdm_local.ctx = {'queue': msg_queue, 'cancelled': cancelled}
 
     routers = {
         'Muskingum': Muskingum,
@@ -105,26 +72,44 @@ def _run_job(router_name: str, config: dict, msg_queue: queue.Queue, cancelled: 
         'UnitMuskingum': UnitMuskingum,
     }
 
+    config = clean_config(config)
+    router_name = resolve_router_name(router_name)
     router_cls = routers.get(router_name)
     if router_cls is None:
-        msg_queue.put(('error', f'Unknown router: {router_name}', ''))
+        msg_queue.put({
+            'kind': 'error',
+            'job_id': job_id,
+            'error': f'Unknown router: {router_name}',
+            'traceback': '',
+        })
         return
 
+    original_stderr = sys.stderr
+    sys.stderr = StderrCapture(msg_queue, original_stderr, job_id)
+
     try:
-        config['progress_bar'] = True
-        config['log'] = True
+        config.setdefault('progress_bar', True)
+        config.setdefault('log', True)
+        config.setdefault('log_level', 'PROGRESS')
 
         router = router_cls(**config)
 
-        handler = WebSocketLogHandler(msg_queue)
+        handler = WebSocketLogHandler(msg_queue, job_id)
+        handler.setLevel(logging.INFO)
         handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
         router.logger.addHandler(handler)
 
         t1 = datetime.datetime.now()
-        msg_queue.put(('started', '', ''))
+        msg_queue.put({
+            'kind': 'started',
+            'job_id': job_id,
+        })
 
         if cancelled.is_set():
-            msg_queue.put(('cancelled', '', ''))
+            msg_queue.put({
+                'kind': 'cancelled',
+                'job_id': job_id,
+            })
             return
 
         router.route()
@@ -139,29 +124,32 @@ def _run_job(router_name: str, config: dict, msg_queue: queue.Queue, cancelled: 
         elif hasattr(router, 'dt_total') and hasattr(router, 'dt_routing'):
             num_timesteps = int(router.dt_total / router.dt_routing) if router.dt_routing else 0
 
-        msg_queue.put(('complete', elapsed, {
-            'output_files': output_files,
-            'num_rivers': num_rivers,
-            'num_timesteps': num_timesteps,
-        }))
-
-    except SimulationCancelled:
-        msg_queue.put(('cancelled', '', ''))
+        msg_queue.put({
+            'kind': 'complete',
+            'job_id': job_id,
+            'elapsed': elapsed,
+            'result': {
+                'output_files': output_files,
+                'num_rivers': num_rivers,
+                'num_timesteps': num_timesteps,
+            },
+        })
 
     except Exception as e:
         import traceback
-        msg_queue.put(('error', str(e), traceback.format_exc()))
+        msg_queue.put({
+            'kind': 'error',
+            'job_id': job_id,
+            'error': str(e),
+            'traceback': traceback.format_exc(),
+        })
 
     finally:
-        _tqdm_local.ctx = None
+        sys.stderr = original_stderr
 
-
-# ---------------------------------------------------------------------------
-# Job + JobManager
-# ---------------------------------------------------------------------------
 
 class Job:
-    MAX_LOGS = 500
+    MAX_LOGS = 1200
 
     def __init__(self, job_id: str, name: str, router: str, config: dict):
         self.id = job_id
@@ -174,12 +162,19 @@ class Job:
         self.logs: list[dict] = []
         self.result: dict | None = None
         self.error_info: dict | None = None
-        self._cancelled = threading.Event()
-        self._msg_queue: queue.Queue = queue.Queue()
-        self._future = None
+        self.started_at: float | None = None
+        self.ended_at: float | None = None
+
+        self._cancel_requested: bool = False
+        self._worker = None
+        self._cancelled = None
+        self._msg_queue = None
+        self._completion_grace_until: float | None = None
 
     def cancel(self):
-        self._cancelled.set()
+        self._cancel_requested = True
+        if self._cancelled is not None:
+            self._cancelled.set()
 
     def add_log(self, level: str, message: str):
         self.logs.append({'level': level, 'message': message})
@@ -193,27 +188,28 @@ class Job:
             'router': self.router,
             'status': self.status,
             'percent': self.percent,
+            'progress_message': self.progress_message,
         }
         if self.result:
             snap['result'] = self.result
         if self.error_info:
             snap['error_info'] = self.error_info
+        if self.started_at is not None:
+            snap['started_at'] = self.started_at
+        if self.ended_at is not None:
+            snap['ended_at'] = self.ended_at
         return snap
 
 
 class JobManager:
-    MAX_WORKERS_CAP = 5
 
     def __init__(self):
         self.jobs: dict[str, Job] = {}
         self.job_order: list[str] = []
-        self.max_workers: int = 1
-        self._executor: ThreadPoolExecutor | None = None
+        self.max_concurrency: int = max(1, int(os.getenv('RR_APP_MAX_WORKERS', '1')))
         self._polling: bool = False
         self.subscribers: set[WebSocket] = set()
-
-    def set_max_workers(self, n: int):
-        self.max_workers = max(1, min(n, self.MAX_WORKERS_CAP))
+        self._mp_context = mp.get_context('spawn')
 
     def submit_jobs(self, jobs_data: list[dict]) -> list[str]:
         ids = []
@@ -224,57 +220,71 @@ class JobManager:
             ids.append(job.id)
         return ids
 
+    def _cancel_running_job(self, job: Job) -> None:
+        job.cancel()
+        if isinstance(job._worker, mp.Process):
+            if job._worker.is_alive():
+                try:
+                    job._worker.terminate()
+                except Exception:
+                    pass
+
     def cancel_job(self, job_id: str):
         job = self.jobs.get(job_id)
         if not job:
             return
         if job.status == 'pending':
             job.status = 'cancelled'
+            job.ended_at = time.time()
         elif job.status == 'running':
-            job.cancel()
+            self._cancel_running_job(job)
 
     def cancel_all(self):
         for jid in self.job_order:
             job = self.jobs.get(jid)
             if job and job.status == 'pending':
                 job.status = 'cancelled'
+                job.ended_at = time.time()
             elif job and job.status == 'running':
-                job.cancel()
+                self._cancel_running_job(job)
 
     def remove_job(self, job_id: str) -> bool:
         job = self.jobs.get(job_id)
         if not job:
             return False
         if job.status == 'running':
-            job.cancel()
+            self._cancel_running_job(job)
+        self._finalize_worker(job)
         del self.jobs[job_id]
         self.job_order = [jid for jid in self.job_order if jid != job_id]
         return True
 
     def clear_finished(self):
         finished = [jid for jid in self.job_order
-                     if self.jobs.get(jid) and self.jobs[jid].status in ('complete', 'error', 'cancelled')]
+                    if self.jobs.get(jid) and self.jobs[jid].status in ('complete', 'error', 'cancelled')]
         for jid in finished:
+            self._finalize_worker(self.jobs[jid])
             del self.jobs[jid]
         self.job_order = [jid for jid in self.job_order if jid in self.jobs]
 
     def clear_all(self):
         for job in self.jobs.values():
             if job.status == 'running':
-                job.cancel()
+                self._cancel_running_job(job)
+            self._finalize_worker(job)
         self.jobs.clear()
         self.job_order.clear()
 
     def get_snapshot(self) -> dict:
         return {
             'type': 'queue_status',
-            'max_workers': self.max_workers,
             'jobs': [self.jobs[jid].snapshot() for jid in self.job_order if jid in self.jobs],
+            'max_concurrency': self.max_concurrency,
         }
 
-    async def run_queue(self):
-        if self._executor is None:
-            self._executor = ThreadPoolExecutor(max_workers=self.MAX_WORKERS_CAP)
+    async def run_queue(self, max_concurrency: int | None = None):
+        if max_concurrency is not None:
+            self.max_concurrency = max(1, int(max_concurrency))
 
         self._start_pending_jobs()
 
@@ -282,18 +292,217 @@ class JobManager:
             self._polling = True
             asyncio.ensure_future(self._poll_loop())
 
+    def _start_job(self, job: Job) -> None:
+        job.status = 'running'
+        job.started_at = time.time()
+        job.ended_at = None
+        job._completion_grace_until = None
+
+        msg_queue = self._mp_context.Queue()
+        cancelled = self._mp_context.Event()
+        worker = self._mp_context.Process(
+            target=_run_job,
+            args=(job.id, job.router, job.config, msg_queue, cancelled),
+            daemon=True,
+        )
+        worker.start()
+
+        job._msg_queue = msg_queue
+        job._cancelled = cancelled
+        job._worker = worker
+
     def _start_pending_jobs(self):
         running_count = sum(1 for j in self.jobs.values() if j.status == 'running')
         for jid in self.job_order:
-            if running_count >= self.max_workers:
+            if running_count >= self.max_concurrency:
                 break
             job = self.jobs.get(jid)
             if job and job.status == 'pending':
-                job.status = 'running'
-                job._future = self._executor.submit(
-                    _run_job, job.router, job.config, job._msg_queue, job._cancelled,
-                )
+                self._start_job(job)
                 running_count += 1
+
+    @staticmethod
+    def _is_worker_alive(job: Job) -> bool:
+        if job._worker is None:
+            return False
+        try:
+            return job._worker.is_alive()
+        except Exception:
+            return False
+
+    @staticmethod
+    def _drain_messages(job: Job) -> list[object]:
+        out = []
+        if job._msg_queue is None:
+            return out
+        while True:
+            try:
+                out.append(job._msg_queue.get_nowait())
+            except queue.Empty:
+                break
+            except Exception:
+                break
+        return out
+
+    @staticmethod
+    def _normalize_message(message: object, fallback_job_id: str) -> dict | None:
+        if isinstance(message, dict):
+            out = dict(message)
+            out.setdefault('job_id', fallback_job_id)
+            return out
+        if isinstance(message, tuple) and len(message) >= 1:
+            kind = message[0]
+            if kind == 'log' and len(message) >= 3:
+                return {
+                    'kind': 'log',
+                    'job_id': fallback_job_id,
+                    'level': message[1],
+                    'message': message[2],
+                }
+            if kind == 'progress' and len(message) >= 3:
+                return {
+                    'kind': 'progress',
+                    'job_id': fallback_job_id,
+                    'percent': message[1],
+                    'message': message[2],
+                }
+            if kind == 'started':
+                return {'kind': 'started', 'job_id': fallback_job_id}
+            if kind == 'complete' and len(message) >= 3:
+                return {
+                    'kind': 'complete',
+                    'job_id': fallback_job_id,
+                    'elapsed': message[1],
+                    'result': message[2],
+                }
+            if kind == 'error' and len(message) >= 3:
+                return {
+                    'kind': 'error',
+                    'job_id': fallback_job_id,
+                    'error': message[1],
+                    'traceback': message[2],
+                }
+            if kind == 'cancelled':
+                return {'kind': 'cancelled', 'job_id': fallback_job_id}
+        return None
+
+    async def _handle_worker_message(self, fallback_job: Job, message: dict) -> None:
+        msg_job_id = str(message.get('job_id') or fallback_job.id)
+        job = self.jobs.get(msg_job_id) or fallback_job
+        kind = message.get('kind')
+
+        if kind == 'log':
+            if job.status != 'running':
+                return
+            level = str(message.get('level', 'INFO'))
+            text = str(message.get('message', ''))
+            job.add_log(level, text)
+            await self._broadcast({
+                'type': 'job_log',
+                'job_id': job.id,
+                'level': level,
+                'message': text,
+            })
+            return
+
+        if kind == 'progress':
+            if job.status != 'running':
+                return
+            pct = float(message.get('percent', 0))
+            msg = str(message.get('message', ''))
+            job.percent = pct
+            job.progress_message = msg
+            await self._broadcast({
+                'type': 'job_progress',
+                'job_id': job.id,
+                'percent': pct,
+                'message': msg,
+            })
+            return
+
+        if kind == 'started':
+            await self._broadcast({
+                'type': 'job_started',
+                'job_id': job.id,
+            })
+            return
+
+        if kind == 'complete':
+            if job.status != 'running':
+                return
+            result = message.get('result') or {}
+            job.status = 'complete'
+            job.ended_at = time.time()
+            job.percent = 100
+            job.result = {
+                'elapsed': float(message.get('elapsed', 0)),
+                'output_files': result.get('output_files', []),
+                'num_rivers': int(result.get('num_rivers', 0)),
+                'num_timesteps': int(result.get('num_timesteps', 0)),
+            }
+            await self._broadcast({
+                'type': 'job_complete',
+                'job_id': job.id,
+                **job.result,
+            })
+            self._finalize_worker(job)
+            return
+
+        if kind == 'error':
+            if job.status != 'running':
+                return
+            err = str(message.get('error', 'Unknown error'))
+            tb = str(message.get('traceback', ''))
+            job.status = 'error'
+            job.ended_at = time.time()
+            job.error_info = {'error': err, 'traceback': tb}
+            await self._broadcast({
+                'type': 'job_error',
+                'job_id': job.id,
+                'error': err,
+                'traceback': tb,
+            })
+            self._finalize_worker(job)
+            return
+
+        if kind == 'cancelled':
+            if job.status != 'running':
+                return
+            job.status = 'cancelled'
+            job.ended_at = time.time()
+            await self._broadcast({
+                'type': 'job_cancelled',
+                'job_id': job.id,
+            })
+            self._finalize_worker(job)
+            return
+
+    @staticmethod
+    def _finalize_worker(job: Job) -> None:
+        worker = job._worker
+        if isinstance(worker, mp.Process):
+            try:
+                worker.join(timeout=0.05)
+            except Exception:
+                pass
+
+        msg_queue = job._msg_queue
+        if msg_queue is not None:
+            if hasattr(msg_queue, 'close'):
+                try:
+                    msg_queue.close()
+                except Exception:
+                    pass
+            if hasattr(msg_queue, 'join_thread'):
+                try:
+                    msg_queue.join_thread()
+                except Exception:
+                    pass
+
+        job._worker = None
+        job._msg_queue = None
+        job._cancelled = None
+        job._completion_grace_until = None
 
     async def _poll_loop(self):
         while True:
@@ -302,78 +511,50 @@ class JobManager:
                 if not job or job.status != 'running':
                     continue
 
-                # Drain this job's message queue
-                while True:
-                    try:
-                        msg = job._msg_queue.get_nowait()
-                    except queue.Empty:
-                        break
+                for raw_msg in self._drain_messages(job):
+                    msg = self._normalize_message(raw_msg, job.id)
+                    if msg is None:
+                        continue
+                    await self._handle_worker_message(job, msg)
 
-                    kind = msg[0]
-                    if kind == 'log':
-                        job.add_log(msg[1], msg[2])
-                        await self._broadcast({
-                            'type': 'job_log',
-                            'job_id': job.id,
-                            'level': msg[1],
-                            'message': msg[2],
-                        })
-                    elif kind == 'progress':
-                        job.percent = msg[1]
-                        job.progress_message = msg[2]
-                        await self._broadcast({
-                            'type': 'job_progress',
-                            'job_id': job.id,
-                            'percent': msg[1],
-                            'message': msg[2],
-                        })
-                    elif kind == 'started':
-                        await self._broadcast({
-                            'type': 'job_started',
-                            'job_id': job.id,
-                        })
-                    elif kind == 'complete':
-                        job.status = 'complete'
-                        job.percent = 100
-                        job.result = {
-                            'elapsed': msg[1],
-                            'output_files': msg[2]['output_files'],
-                            'num_rivers': msg[2]['num_rivers'],
-                            'num_timesteps': msg[2]['num_timesteps'],
-                        }
-                        await self._broadcast({
-                            'type': 'job_complete',
-                            'job_id': job.id,
-                            **job.result,
-                        })
-                    elif kind == 'error':
+                if job.status != 'running':
+                    continue
+
+                worker_alive = self._is_worker_alive(job)
+                if worker_alive:
+                    continue
+
+                # In process mode, allow a short grace period for queued terminal messages to arrive.
+                now = time.monotonic()
+                if job._completion_grace_until is None:
+                    job._completion_grace_until = now + 0.25
+                    continue
+                if now < job._completion_grace_until:
+                    continue
+
+                for raw_msg in self._drain_messages(job):
+                    msg = self._normalize_message(raw_msg, job.id)
+                    if msg is None:
+                        continue
+                    await self._handle_worker_message(job, msg)
+
+                if job.status == 'running':
+                    if job._cancel_requested:
+                        job.status = 'cancelled'
+                        job.ended_at = time.time()
+                        await self._broadcast({'type': 'job_cancelled', 'job_id': job.id})
+                    else:
                         job.status = 'error'
-                        job.error_info = {'error': msg[1], 'traceback': msg[2]}
+                        job.ended_at = time.time()
+                        job.error_info = {'error': 'Simulation terminated unexpectedly', 'traceback': ''}
                         await self._broadcast({
                             'type': 'job_error',
                             'job_id': job.id,
-                            'error': msg[1],
-                            'traceback': msg[2],
+                            'error': 'Simulation terminated unexpectedly',
+                            'traceback': '',
                         })
-                    elif kind == 'cancelled':
-                        job.status = 'cancelled'
-                        await self._broadcast({
-                            'type': 'job_cancelled',
-                            'job_id': job.id,
-                        })
+                self._finalize_worker(job)
 
-                # Thread finished but no terminal message yet
-                if job._future and job._future.done() and job.status == 'running':
-                    job.status = 'error'
-                    job.error_info = {'error': 'Simulation thread terminated unexpectedly', 'traceback': ''}
-                    await self._broadcast({
-                        'type': 'job_error',
-                        'job_id': job.id,
-                        'error': 'Simulation thread terminated unexpectedly',
-                        'traceback': '',
-                    })
-
-            # Start more pending jobs if slots opened up
             self._start_pending_jobs()
 
             has_active = any(
@@ -397,5 +578,4 @@ class JobManager:
         self.subscribers -= dead
 
 
-# Module-level singleton
 job_manager = JobManager()

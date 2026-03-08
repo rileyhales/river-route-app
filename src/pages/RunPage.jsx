@@ -1,9 +1,10 @@
-import { useContext, useState, useRef } from 'preact/hooks'
-import { WsContext, QueueContext, ConfigContext, prepareJobConfig } from '../app.jsx'
+import { useContext, useState, useRef, useEffect } from 'preact/hooks'
+import { QueueContext, prepareJobConfig } from '../app.jsx'
 import { ProgressPanel } from '../components/ProgressPanel.jsx'
 
 const STATUS_COLORS = {
   pending: { bg: 'rgba(163,163,163,0.12)', color: 'var(--text-muted)', label: 'Pending' },
+  queued: { bg: 'rgba(163,163,163,0.12)', color: 'var(--text-muted)', label: 'Queued' },
   running: { bg: 'rgba(217,119,6,0.12)', color: 'var(--warning)', label: 'Running' },
   complete: { bg: 'rgba(5,150,105,0.12)', color: 'var(--success)', label: 'Complete' },
   error: { bg: 'rgba(220,38,38,0.12)', color: 'var(--error)', label: 'Error' },
@@ -16,6 +17,17 @@ const formatElapsed = (seconds) => {
   const min = Math.floor(seconds / 60)
   const sec = (seconds % 60).toFixed(1)
   return `${min}m ${sec}s`
+}
+
+const formatBatchElapsed = (elapsedMs) => {
+  if (elapsedMs == null) return 'Not started'
+  const totalSeconds = Math.max(0, Math.floor(elapsedMs / 1000))
+  const hours = Math.floor(totalSeconds / 3600)
+  const minutes = Math.floor((totalSeconds % 3600) / 60)
+  const seconds = totalSeconds % 60
+  if (hours > 0) return `${hours}h ${String(minutes).padStart(2, '0')}m ${String(seconds).padStart(2, '0')}s`
+  if (minutes > 0) return `${minutes}m ${String(seconds).padStart(2, '0')}s`
+  return `${seconds}s`
 }
 
 function StatusBadge({ status }) {
@@ -143,6 +155,11 @@ function JobRow({ job, isSelected, onSelect, onRemove, onCancel, onRequeue }) {
           {job.result?.num_rivers != null && (
             <span>{job.result.num_rivers.toLocaleString()} rivers</span>
           )}
+          {isActive && job.progressMessage && (
+            <span style={{ color: 'var(--warning)', fontWeight: 600 }}>
+              {job.progressMessage}
+            </span>
+          )}
         </div>
       </div>
 
@@ -190,11 +207,15 @@ function JobRow({ job, isSelected, onSelect, onRemove, onCancel, onRequeue }) {
 
 /** Left panel: Queue management */
 export function QueuePanel() {
-  const ws = useContext(WsContext)
-  const { config } = useContext(ConfigContext)
   const q = useContext(QueueContext)
   const fileInputRef = useRef(null)
   const [dragOver, setDragOver] = useState(false)
+  const [maxConcurrency, setMaxConcurrency] = useState(1)
+
+  useEffect(() => {
+    const max = Number(q.queueSettings?.maxConcurrency || 1)
+    setMaxConcurrency(max > 0 ? max : 1)
+  }, [q.queueSettings?.maxConcurrency])
 
   const hasJobs = q.jobs.length > 0
   const hasPending = q.jobs.some(j => j.status === 'pending')
@@ -202,8 +223,41 @@ export function QueuePanel() {
   const hasFinished = q.jobs.some(j => j.status === 'complete' || j.status === 'error' || j.status === 'cancelled')
   const completeCount = q.jobs.filter(j => j.status === 'complete').length
   const errorCount = q.jobs.filter(j => j.status === 'error').length
+  const cancelledCount = q.jobs.filter(j => j.status === 'cancelled').length
   const runningCount = q.jobs.filter(j => j.status === 'running').length
   const pendingCount = q.jobs.filter(j => j.status === 'pending').length
+  const [nowMs, setNowMs] = useState(() => Date.now())
+
+  const batchStatus = hasRunning
+    ? 'running'
+    : hasPending
+      ? 'queued'
+      : errorCount > 0
+        ? 'error'
+        : cancelledCount > 0
+          ? 'cancelled'
+          : 'complete'
+
+  const startedTimes = q.jobs
+    .map(j => (typeof j.startedAt === 'number' ? j.startedAt : null))
+    .filter((t) => t != null)
+  const batchStartedAt = startedTimes.length ? Math.min(...startedTimes) : null
+
+  const endedTimes = q.jobs
+    .filter(j => typeof j.startedAt === 'number')
+    .map(j => (typeof j.endedAt === 'number' ? j.endedAt : null))
+    .filter((t) => t != null)
+  const batchEndedAt = !hasRunning && endedTimes.length ? Math.max(...endedTimes) : null
+  const batchElapsedMs = batchStartedAt == null ? null : (batchEndedAt ?? nowMs) - batchStartedAt
+
+  useEffect(() => {
+    if (!hasRunning || batchStartedAt == null) return
+    setNowMs(Date.now())
+    const timer = setInterval(() => {
+      setNowMs(Date.now())
+    }, 1000)
+    return () => clearInterval(timer)
+  }, [hasRunning, batchStartedAt])
 
   const loadConfigFiles = (files) => {
     const fileList = Array.from(files).filter(f => f.name.endsWith('.json'))
@@ -250,13 +304,11 @@ export function QueuePanel() {
   const handleDragOver = (e) => { e.preventDefault(); setDragOver(true) }
   const handleDragLeave = (e) => { e.preventDefault(); setDragOver(false) }
 
-  const handleAddCurrent = () => {
-    q.addCurrentConfig(false)
-  }
-
   const handleRunAll = () => {
     if (hasPending) {
-      q.runQueue()
+      q.runQueue({
+        max_concurrency: Math.max(1, Number(maxConcurrency) || 1),
+      })
     }
   }
 
@@ -288,6 +340,15 @@ export function QueuePanel() {
               (errorCount ? ` \u2022 ${errorCount} failed` : '')
             : 'Add configs to the queue and run them'}
         </p>
+        {hasJobs && (
+          <div style={styles.batchSummary}>
+            <span style={styles.batchLabel}>Batch</span>
+            <StatusBadge status={batchStatus} />
+            <span style={styles.batchMeta}>
+              Elapsed: <strong style={styles.batchElapsed}>{formatBatchElapsed(batchElapsedMs)}</strong>
+            </span>
+          </div>
+        )}
       </div>
 
       {/* Controls bar */}
@@ -296,9 +357,18 @@ export function QueuePanel() {
           <button class="btn-secondary" onClick={handleUploadConfigs}>
             Upload Configs
           </button>
-          <button class="btn-secondary" onClick={handleAddCurrent}>
-            Add Current Config
-          </button>
+        </div>
+        <div style={styles.runSettings}>
+          <label style={styles.runSettingLabel}>Parallel Workers</label>
+          <input
+            type="number"
+            min="1"
+            max="16"
+            value={maxConcurrency}
+            onInput={(e) => setMaxConcurrency(e.target.value)}
+            style={{ width: '80px' }}
+            disabled={hasRunning}
+          />
         </div>
         <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
           {!hasRunning && hasPending && (
@@ -321,41 +391,6 @@ export function QueuePanel() {
               Clear All
             </button>
           )}
-        </div>
-      </div>
-
-      {/* Concurrency selector */}
-      <div style={styles.concurrencyBar}>
-        <span style={{ fontSize: '13px', color: 'var(--text-secondary)', fontWeight: '600' }}>
-          Parallel Workers:
-        </span>
-        <div style={{ display: 'flex', gap: '4px' }}>
-          {[1, 2, 3, 4, 5].map(n => (
-            <button
-              key={n}
-              onClick={() => q.changeMaxWorkers(n)}
-              style={{
-                width: '32px',
-                height: '28px',
-                borderRadius: '4px',
-                border: 'none',
-                fontSize: '14px',
-                fontWeight: '600',
-                cursor: 'pointer',
-                fontFamily: 'inherit',
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-                lineHeight: '1',
-                padding: '0',
-                background: n === q.maxWorkers ? 'var(--accent)' : 'var(--bg-elevated)',
-                color: n === q.maxWorkers ? '#fff' : 'var(--text-secondary)',
-                transition: 'all 0.1s',
-              }}
-            >
-              {n}
-            </button>
-          ))}
         </div>
       </div>
 
@@ -398,7 +433,6 @@ export function QueuePanel() {
 /** Right panel: Logs for selected job */
 export function JobLogs() {
   const q = useContext(QueueContext)
-  const ws = useContext(WsContext)
   const selectedJob = q.jobs.find(j => j.id === q.selectedJobId)
 
   if (!selectedJob) {
@@ -425,7 +459,7 @@ export function JobLogs() {
           </span>
           <StatusBadge status={selectedJob.status} />
         </div>
-        <div style={{ fontSize: '13px', color: 'var(--text-muted)', display: 'flex', gap: '16px' }}>
+        <div style={{ fontSize: '13px', color: 'var(--text-secondary)', display: 'flex', gap: '16px' }}>
           <span>Router: <strong>{selectedJob.router}</strong></span>
           {selectedJob.result?.elapsed != null && (
             <span>Elapsed: <strong>{formatElapsed(selectedJob.result.elapsed)}</strong></span>
@@ -433,8 +467,11 @@ export function JobLogs() {
           {selectedJob.result?.num_rivers != null && (
             <span>Rivers: <strong>{selectedJob.result.num_rivers.toLocaleString()}</strong></span>
           )}
-          {selectedJob.result?.num_timesteps != null && (
-            <span>Timesteps: <strong>{selectedJob.result.num_timesteps.toLocaleString()}</strong></span>
+          {Array.isArray(selectedJob.result?.output_files) && (
+            <span>Files Routed: <strong>{selectedJob.result.output_files.length.toLocaleString()}</strong></span>
+          )}
+          {selectedJob.status === 'running' && selectedJob.progressMessage && (
+            <span>Step: <strong>{selectedJob.progressMessage}</strong></span>
           )}
         </div>
       </div>
@@ -443,7 +480,7 @@ export function JobLogs() {
       {hasError && (
         <div style={styles.errorBlock}>
           <div style={styles.errorTitle}>Error</div>
-          <div style={{ fontSize: '14px', color: '#fb7185', lineHeight: '1.5' }}>
+          <div style={{ fontSize: '14px', color: 'var(--error)', lineHeight: '1.5' }}>
             {selectedJob.errorInfo.error}
           </div>
         </div>
@@ -482,6 +519,7 @@ const styles = {
     flex: 1,
     padding: '16px',
     overflow: 'hidden',
+    height: '100%',
     minHeight: 0,
   },
   dropActive: {
@@ -497,15 +535,43 @@ const styles = {
     flexShrink: 0,
     marginBottom: '12px',
   },
-  concurrencyBar: {
+  runSettings: {
     display: 'flex',
     alignItems: 'center',
-    gap: '12px',
-    padding: '8px 12px',
-    background: 'var(--bg-elevated)',
+    gap: '6px',
+    padding: '6px 10px',
     borderRadius: '6px',
-    flexShrink: 0,
-    marginBottom: '12px',
+    border: '1px solid var(--border)',
+    background: 'var(--bg-elevated)',
+    flexWrap: 'wrap',
+  },
+  runSettingLabel: {
+    fontSize: '11px',
+    textTransform: 'uppercase',
+    letterSpacing: '0.4px',
+    fontWeight: '700',
+    color: 'var(--text-muted)',
+  },
+  batchSummary: {
+    marginTop: '8px',
+    display: 'flex',
+    alignItems: 'center',
+    gap: '10px',
+    flexWrap: 'wrap',
+  },
+  batchLabel: {
+    fontSize: '12px',
+    fontWeight: '700',
+    textTransform: 'uppercase',
+    letterSpacing: '0.4px',
+    color: 'var(--text-muted)',
+  },
+  batchMeta: {
+    fontSize: '12px',
+    color: 'var(--text-secondary)',
+  },
+  batchElapsed: {
+    color: 'var(--text-primary)',
   },
   jobList: {
     flex: 1,
@@ -546,7 +612,7 @@ const styles = {
   errorTitle: {
     fontSize: '14px',
     fontWeight: '600',
-    color: '#fb7185',
+    color: 'var(--error)',
     marginBottom: '6px',
   },
 }

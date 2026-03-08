@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback } from 'preact/hooks'
+import { useState, useEffect, useRef, useCallback, useMemo } from 'preact/hooks'
 
 let _reqCounter = 0
 
@@ -12,6 +12,7 @@ export function useWebSocket() {
   const wsRef = useRef(null)
   const listenersRef = useRef({})
   const reconnectTimer = useRef(null)
+  const reconnectAttempts = useRef(0)
 
   const connect = useCallback(() => {
     if (wsRef.current && wsRef.current.readyState <= 1) return
@@ -20,6 +21,7 @@ export function useWebSocket() {
 
     ws.onopen = () => {
       setConnected(true)
+      reconnectAttempts.current = 0
       if (reconnectTimer.current) {
         clearTimeout(reconnectTimer.current)
         reconnectTimer.current = null
@@ -29,8 +31,10 @@ export function useWebSocket() {
     ws.onclose = () => {
       setConnected(false)
       wsRef.current = null
-      // Auto reconnect after 2 seconds
-      reconnectTimer.current = setTimeout(connect, 2000)
+      // Exponential backoff reconnect, capped at 10s
+      reconnectAttempts.current += 1
+      const wait = Math.min(10000, 1000 * (2 ** Math.min(reconnectAttempts.current - 1, 4)))
+      reconnectTimer.current = setTimeout(connect, wait)
     }
 
     ws.onerror = () => {
@@ -147,5 +151,5 @@ export function useWebSocket() {
     return cleanup
   }, [send, on])
 
-  return { connected, send, on, off, request }
+  return useMemo(() => ({ connected, send, on, off, request }), [connected, send, on, off, request])
 }

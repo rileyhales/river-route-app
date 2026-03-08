@@ -41,9 +41,17 @@ const PROCESSING_FIELDS = [
 ]
 
 const UNIT_FIELDS = [
-  { key: 'transformer_kernel_file', label: 'Unit Hydrograph Kernel', type: 'file', required: true, hint: 'Scipy sparse npz kernel file' },
-  { key: 'transformer_state_init_file', label: 'Initial Transformer State', type: 'file', hint: 'Parquet state file (optional warm start)' },
-  { key: 'transformer_state_final_file', label: 'Final Transformer State Output', type: 'file', hint: 'Path to write final transformer state' },
+  { key: 'uh_kernel_file', label: 'Unit Hydrograph Kernel', type: 'file', required: true, hint: 'Scipy sparse npz kernel file' },
+  { key: 'uh_state_init_file', label: 'Initial UH State', type: 'file', hint: 'Parquet state file (optional warm start)' },
+  { key: 'uh_state_final_file', label: 'Final UH State Output', type: 'file', hint: 'Path to write final UH state' },
+]
+
+const RUNTIME_FIELDS = [
+  { key: 'log', label: 'Enable Logging', type: 'boolean' },
+  { key: 'progress_bar', label: 'Show Progress Bar', type: 'boolean' },
+  { key: 'log_level', label: 'Log Level', type: 'select', options: ['DEBUG', 'INFO', 'PROGRESS', 'WARNING', 'ERROR', 'CRITICAL'], defaultValue: 'PROGRESS' },
+  { key: 'log_stream', label: 'Log Stream', type: 'text', placeholder: 'stdout or /path/to/file.log' },
+  { key: 'log_format', label: 'Log Format', type: 'text', placeholder: '%(levelname)s - %(asctime)s - %(message)s' },
 ]
 
 const ADVANCED_FIELDS = [
@@ -53,7 +61,6 @@ const ADVANCED_FIELDS = [
   { key: 'var_y', label: 'Y Variable', type: 'text', placeholder: 'y' },
   { key: 'var_t', label: 'Time Variable', type: 'text', placeholder: 'time' },
   { key: 'var_grid_runoff', label: 'Grid Runoff Variable', type: 'text', placeholder: 'ro' },
-  { key: 'log_level', label: 'Log Level', type: 'select', options: ['DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL'] },
 ]
 
 /**
@@ -68,8 +75,10 @@ export const VALID_KEYS = {
     'discharge_dir', 'discharge_files',
     // time (Muskingum-specific: dt_routing & dt_total required, start_datetime optional)
     'dt_routing', 'dt_total', 'dt_discharge', 'start_datetime',
+    // runtime
+    'log', 'progress_bar', 'log_level', 'log_stream', 'log_format',
     // variable names (only universal ones — no lateral inflow vars)
-    'var_river_id', 'var_discharge', 'log_level',
+    'var_river_id', 'var_discharge',
   ]),
   RapidMuskingum: new Set([
     '_router',
@@ -82,9 +91,11 @@ export const VALID_KEYS = {
     'dt_routing', 'dt_runoff', 'dt_discharge', 'dt_total',
     // processing
     'runoff_processing_mode', 'grid_accumulation_type',
+    // runtime
+    'log', 'progress_bar', 'log_level', 'log_stream', 'log_format',
     // variable names (all)
     'var_river_id', 'var_discharge', 'var_x', 'var_y', 'var_t',
-    'var_grid_runoff', 'log_level',
+    'var_grid_runoff',
   ]),
   UnitMuskingum: new Set([
     '_router',
@@ -94,14 +105,16 @@ export const VALID_KEYS = {
     // input data
     'qlateral_files', 'grid_runoff_files', 'grid_weights_file',
     // unit hydrograph
-    'transformer_kernel_file', 'transformer_state_init_file', 'transformer_state_final_file',
+    'uh_kernel_file', 'uh_state_init_file', 'uh_state_final_file',
     // time (all optional — NO start_datetime per docs)
     'dt_routing', 'dt_runoff', 'dt_discharge', 'dt_total',
     // processing
     'runoff_processing_mode', 'grid_accumulation_type',
+    // runtime
+    'log', 'progress_bar', 'log_level', 'log_stream', 'log_format',
     // variable names (all)
     'var_river_id', 'var_discharge', 'var_x', 'var_y', 'var_t',
-    'var_grid_runoff', 'log_level',
+    'var_grid_runoff',
   ]),
 }
 
@@ -190,6 +203,18 @@ function FormField({ field, value, onChange }) {
   if (field.type === 'multifile') {
     return <MultiFileField field={field} value={value} onChange={onChange} />
   }
+  if (field.type === 'boolean') {
+    const selected = value === undefined || value === null || value === '' ? true : Boolean(value)
+    return (
+      <div class="form-group">
+        <label class="form-label">{field.label}</label>
+        <select value={String(selected)} onChange={(e) => onChange(field.key, e.target.value === 'true')}>
+          <option value="true">Enabled</option>
+          <option value="false">Disabled</option>
+        </select>
+      </div>
+    )
+  }
 
   return (
     <div class="form-group">
@@ -199,11 +224,17 @@ function FormField({ field, value, onChange }) {
       </label>
       {field.type === 'select' ? (
         <select
-          value={value || field.options[0]}
-          onChange={(e) => onChange(field.key, e.target.value)}
+          value={value ?? field.defaultValue ?? field.options[0]}
+          onChange={(e) => {
+            let next = e.target.value
+            const first = field.options[0]
+            if (typeof first === 'number') next = Number(next)
+            if (typeof first === 'boolean') next = next === 'true'
+            onChange(field.key, next)
+          }}
         >
           {field.options.map(opt => (
-            <option key={opt} value={opt}>{opt}</option>
+            <option key={String(opt)} value={String(opt)}>{String(opt)}</option>
           ))}
         </select>
       ) : (
@@ -365,6 +396,8 @@ export function RouterForm({ router, config, onChange }) {
           <FieldGroup title="Processing Options" fields={PROCESSING_FIELDS} config={config} onChange={onChange} />
         </>
       )}
+
+      <FieldGroup title="Runtime & Logging" fields={RUNTIME_FIELDS} config={config} onChange={onChange} />
 
       <div>
         <div

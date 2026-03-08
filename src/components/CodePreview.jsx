@@ -1,6 +1,7 @@
 import { useState, useContext } from 'preact/hooks'
 import { ConfigContext } from '../app.jsx'
 import { VALID_KEYS, getExcludedKeys } from './RouterForm.jsx'
+import { inferRouter, normalizeLoadedConfig, stripEmptyValues } from '../utils/configSchema.js'
 
 /**
  * Generate Python code string from the current config state.
@@ -54,10 +55,11 @@ export function resolveDischargeDir(config) {
 }
 
 function generateCode(config) {
-  const router = config._router || 'Muskingum'
+  const normalized = normalizeLoadedConfig(config)
+  const router = inferRouter(normalized, normalized._router || 'Muskingum')
 
   // Resolve discharge_dir → discharge_files (same logic as Python Configs)
-  const resolved = resolveDischargeDir(config)
+  const resolved = resolveDischargeDir(normalized)
 
   // Fields to include as constructor kwargs — skip empty/default values
   const SKIP = new Set(['_router'])
@@ -69,13 +71,17 @@ function generateCode(config) {
     var_y: 'y',
     var_t: 'time',
     var_grid_runoff: 'ro',
-    log_level: 'INFO',
+    log_level: 'PROGRESS',
+    log_stream: 'stdout',
+    log_format: '%(levelname)s - %(asctime)s - %(message)s',
+    log: true,
+    progress_bar: true,
     runoff_processing_mode: 'sequential',
     grid_accumulation_type: 'incremental',
   }
 
   const allowed = VALID_KEYS[router] || VALID_KEYS.Muskingum
-  const excluded = getExcludedKeys(config)
+  const excluded = getExcludedKeys(normalized)
 
   const args = []
   for (const [key, val] of Object.entries(resolved)) {
@@ -133,16 +139,12 @@ function formatValue(val) {
 }
 
 function generateJSON(config) {
-  const resolved = resolveDischargeDir(config)
-  const excluded = getExcludedKeys(config)
-  const cleaned = {}
-  for (const [key, val] of Object.entries(resolved)) {
-    if (key.startsWith('_')) continue
-    if (excluded.has(key)) continue
-    if (val === null || val === undefined || val === '') continue
-    if (Array.isArray(val) && val.length === 0) continue
-    cleaned[key] = val
-  }
+  const normalized = normalizeLoadedConfig(config)
+  const resolved = resolveDischargeDir(normalized)
+  const excluded = getExcludedKeys(normalized)
+  const cleaned = stripEmptyValues(
+    Object.fromEntries(Object.entries(resolved).filter(([key]) => !excluded.has(key)))
+  )
   return JSON.stringify(cleaned, null, 2)
 }
 

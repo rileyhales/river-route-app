@@ -1,7 +1,7 @@
 import { useState, useContext, useCallback } from 'preact/hooks'
 import { WsContext, ConfigContext, QueueContext } from '../app.jsx'
-import { resolveDischargeDir } from '../components/CodePreview.jsx'
 import { RouterForm, VALID_KEYS } from '../components/RouterForm.jsx'
+import { normalizeLoadedConfig } from '../utils/configSchema.js'
 
 const ROUTERS = ['Muskingum', 'RapidMuskingum', 'UnitMuskingum']
 
@@ -11,8 +11,6 @@ export function ConfigPage({ onNavigate }) {
   const q = useContext(QueueContext)
   const [validation, setValidation] = useState(null)
   const [validating, setValidating] = useState(false)
-
-  const hasRunning = q.jobs.some(j => j.status === 'running')
 
   const router = config._router || 'Muskingum'
 
@@ -38,10 +36,11 @@ export function ConfigPage({ onNavigate }) {
   const validate = useCallback(() => {
     setValidating(true)
     setValidation(null)
-    const { _router, ...cfgFields } = config
+    const normalized = normalizeLoadedConfig(config)
+    const { _router, ...cfgFields } = normalized
 
     ws.request(
-      { type: 'validate_config', config: cfgFields },
+      { type: 'validate_config', router: _router, config: cfgFields },
       'validation_result',
       (data) => {
         setValidation(data)
@@ -58,8 +57,11 @@ export function ConfigPage({ onNavigate }) {
   }, [ws, config])
 
   const saveConfig = useCallback(() => {
-    const resolved = resolveDischargeDir(config)
-    const blob = new Blob([JSON.stringify(resolved, null, 2)], { type: 'application/json' })
+    const out = {}
+    for (const [k, v] of Object.entries(config)) {
+      if (!k.startsWith('_')) out[k] = v
+    }
+    const blob = new Blob([JSON.stringify(out, null, 2)], { type: 'application/json' })
     const url = URL.createObjectURL(blob)
     const a = document.createElement('a')
     a.href = url
@@ -79,7 +81,7 @@ export function ConfigPage({ onNavigate }) {
       reader.onload = (ev) => {
         try {
           const loaded = JSON.parse(ev.target.result)
-          setConfig(loaded)
+          setConfig(normalizeLoadedConfig(loaded))
           setValidation(null)
         } catch {
           alert('Invalid JSON file')
@@ -112,7 +114,14 @@ export function ConfigPage({ onNavigate }) {
       {validation && (
         <div class="card" style={{ marginBottom: '16px', borderColor: validation.valid ? 'var(--success)' : 'var(--error)' }}>
           {validation.valid ? (
-            <span class="badge badge-success">Configuration is valid</span>
+            <div>
+              <span class="badge badge-success">Configuration is valid</span>
+              {validation.warnings?.length > 0 && (
+                <ul style={{ margin: '8px 0 0 20px', color: 'var(--warning)', fontSize: '13px' }}>
+                  {validation.warnings.map((w, i) => <li key={i}>{w}</li>)}
+                </ul>
+              )}
+            </div>
           ) : (
             <div>
               <span class="badge badge-error" style={{ marginBottom: '8px', display: 'inline-block' }}>Validation errors</span>

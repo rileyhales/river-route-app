@@ -7,35 +7,33 @@ import { CodePreview, resolveDischargeDir } from './components/CodePreview.jsx'
 import { getExcludedKeys } from './components/RouterForm.jsx'
 import { QueuePanel, JobLogs } from './pages/RunPage.jsx'
 import { ResultsBrowser, ResultsChart } from './pages/ResultsPage.jsx'
+import { inferRouter, normalizeLoadedConfig, stripEmptyValues } from './utils/configSchema.js'
 import './style/global.css'
 
 export const WsContext = createContext(null)
 export const ConfigContext = createContext(null)
 export const WorkdirContext = createContext(null)
 export const QueueContext = createContext(null)
+export const ResultsContext = createContext(null)
 
 /** Prepare a raw config (from form or loaded JSON) into {router, config} ready to send.
  *  For form-built configs (have _dischargeMode/_lateralMode), resolve discharge_dir and filter excluded keys.
  *  For plain configs (uploaded JSON without _ keys), just strip _ keys and pass through. */
 export function prepareJobConfig(rawConfig) {
-  const isFormConfig = '_dischargeMode' in rawConfig || '_lateralMode' in rawConfig
-  const router = rawConfig._router || 'Muskingum'
+  const normalized = normalizeLoadedConfig(rawConfig)
+  const isFormConfig = '_dischargeMode' in normalized || '_lateralMode' in normalized
+  const router = inferRouter(normalized, normalized._router || 'Muskingum')
 
   if (isFormConfig) {
-    const resolved = resolveDischargeDir(rawConfig)
-    const excluded = getExcludedKeys(rawConfig)
-    const config = {}
-    for (const [k, v] of Object.entries(resolved)) {
-      if (!k.startsWith('_') && !excluded.has(k)) config[k] = v
-    }
+    const resolved = resolveDischargeDir(normalized)
+    const excluded = getExcludedKeys(normalized)
+    const config = stripEmptyValues(
+      Object.fromEntries(Object.entries(resolved).filter(([k]) => !excluded.has(k)))
+    )
     return { router, config }
   }
 
-  // Plain config — just strip _ prefixed keys
-  const config = {}
-  for (const [k, v] of Object.entries(rawConfig)) {
-    if (!k.startsWith('_')) config[k] = v
-  }
+  const config = stripEmptyValues(normalized)
   return { router, config }
 }
 
@@ -56,7 +54,7 @@ export function App() {
   const [config, setConfig] = useState(() => {
     try {
       const saved = localStorage.getItem('rr_config')
-      return saved ? JSON.parse(saved) : { _router: 'Muskingum' }
+      return saved ? normalizeLoadedConfig(JSON.parse(saved)) : { _router: 'Muskingum' }
     } catch { return { _router: 'Muskingum' } }
   })
 
@@ -65,6 +63,19 @@ export function App() {
   }, [config])
 
   const [workdir, setWorkdir] = useState('')
+  useEffect(() => {
+    if (!ws.connected) return
+    const cleanup = ws.request(
+      { type: 'get_workdir' },
+      'workdir_set',
+      (data) => {
+        if (data.path) setWorkdir(data.path)
+      },
+      { timeout: 5000 },
+    )
+    return cleanup
+  }, [ws, ws.connected])
+
   const [page, setPage] = useState(() => {
     try {
       return sessionStorage.getItem('rr_page') || 'config'
@@ -78,47 +89,114 @@ export function App() {
   // ---- Reset key — increment to remount stateful components ----
   const [resetKey, setResetKey] = useState(0)
 
+  // ---- Results state ----
+  const [validationData, setValidationData] = useState({
+    sourceName: '',
+    parsed: null,
+    error: '',
+  })
+
   // ---- Queue state ----
   const [jobs, setJobs] = useState([])
-  const [maxWorkers, setMaxWorkers] = useState(1)
   const [selectedJobId, setSelectedJobId] = useState(null)
+  const [queueSettings, setQueueSettings] = useState({
+    maxConcurrency: 1,
+  })
   const jobsRef = useRef([])
+  const batchedJobUpdatesRef = useRef(new Map())
+  const flushRafRef = useRef(null)
   useEffect(() => { jobsRef.current = jobs }, [jobs])
+
+  const flushBatchedUpdates = useCallback(() => {
+    flushRafRef.current = null
+    const updates = batchedJobUpdatesRef.current
+    batchedJobUpdatesRef.current = new Map()
+    if (updates.size === 0) return
+
+    setJobs(prev => prev.map((job) => {
+      const patch = updates.get(job.id)
+      if (!patch) return job
+
+      let next = job
+      if (patch.percent !== undefined || patch.progressMessage !== undefined) {
+        next = {
+          ...next,
+          ...(patch.percent !== undefined ? { percent: patch.percent } : {}),
+          ...(patch.progressMessage !== undefined ? { progressMessage: patch.progressMessage } : {}),
+        }
+      }
+      if (patch.logs?.length) {
+        const mergedLogs = [...next.logs, ...patch.logs]
+        next = { ...next, logs: mergedLogs.slice(-1200) }
+      }
+      return next
+    }))
+  }, [])
+
+  const queueJobPatch = useCallback((jobId, patch) => {
+    const prev = batchedJobUpdatesRef.current.get(jobId) || {}
+    const merged = {
+      ...prev,
+      ...patch,
+      logs: [...(prev.logs || []), ...(patch.logs || [])],
+    }
+    batchedJobUpdatesRef.current.set(jobId, merged)
+    if (flushRafRef.current == null) {
+      flushRafRef.current = requestAnimationFrame(flushBatchedUpdates)
+    }
+  }, [flushBatchedUpdates])
 
   // Subscribe to job queue WebSocket events
   useEffect(() => {
     const unsubs = [
       // Full snapshot on reconnect
       ws.on('queue_status', (data) => {
-        const restored = (data.jobs || []).map(j => ({
-          id: j.id,
-          name: j.name,
-          router: j.router,
-          status: j.status,
-          percent: j.percent || 0,
-          logs: [],
-          result: j.result || null,
-          errorInfo: j.error_info || null,
-        }))
+        const nowMs = Date.now()
+        const restored = (data.jobs || []).map((j) => {
+          const startedAt = typeof j.started_at === 'number' ? j.started_at * 1000 : null
+          const endedAt = typeof j.ended_at === 'number'
+            ? j.ended_at * 1000
+            : (startedAt != null && (j.status === 'complete' || j.status === 'error' || j.status === 'cancelled')
+                ? nowMs
+                : null)
+          return {
+            id: j.id,
+            name: j.name,
+            router: j.router,
+            status: j.status,
+            percent: j.percent || 0,
+            progressMessage: j.progress_message || '',
+            logs: [],
+            result: j.result || null,
+            errorInfo: j.error_info || null,
+            startedAt,
+            endedAt,
+          }
+        })
         setJobs(restored)
-        setMaxWorkers(data.max_workers || 1)
+        setQueueSettings({
+          maxConcurrency: data.max_concurrency || 1,
+        })
       }),
       ws.on('job_started', (data) => {
         setJobs(prev => prev.map(j =>
-          j.id === data.job_id ? { ...j, status: 'running', percent: 0 } : j
+          j.id === data.job_id
+            ? {
+                ...j,
+                status: 'running',
+                percent: 0,
+                progressMessage: '',
+                startedAt: j.startedAt ?? Date.now(),
+                endedAt: null,
+              }
+            : j
         ))
       }),
       ws.on('job_progress', (data) => {
-        setJobs(prev => prev.map(j =>
-          j.id === data.job_id ? { ...j, percent: data.percent } : j
-        ))
+        queueJobPatch(data.job_id, { percent: data.percent, progressMessage: data.message || '' })
       }),
       ws.on('job_log', (data) => {
-        setJobs(prev => prev.map(j =>
-          j.id === data.job_id
-            ? { ...j, logs: [...j.logs, { level: data.level, message: data.message }] }
-            : j
-        ))
+        queueJobPatch(data.job_id, { logs: [{ level: data.level, message: data.message }] })
       }),
       ws.on('job_complete', (data) => {
         setJobs(prev => prev.map(j =>
@@ -127,6 +205,7 @@ export function App() {
                 ...j,
                 status: 'complete',
                 percent: 100,
+                endedAt: Date.now(),
                 result: {
                   elapsed: data.elapsed,
                   output_files: data.output_files,
@@ -143,7 +222,9 @@ export function App() {
             ? {
                 ...j,
                 status: 'error',
+                endedAt: Date.now(),
                 errorInfo: { error: data.error, traceback: data.traceback },
+                progressMessage: '',
                 logs: data.traceback
                   ? [...j.logs, { level: 'ERROR', message: data.traceback }]
                   : j.logs,
@@ -153,7 +234,7 @@ export function App() {
       }),
       ws.on('job_cancelled', (data) => {
         setJobs(prev => prev.map(j =>
-          j.id === data.job_id ? { ...j, status: 'cancelled' } : j
+          j.id === data.job_id ? { ...j, status: 'cancelled', endedAt: Date.now() } : j
         ))
       }),
       ws.on('job_removed', (data) => {
@@ -162,12 +243,15 @@ export function App() {
       ws.on('queue_idle', () => {
         // All jobs done — could auto-navigate
       }),
-      ws.on('max_workers_set', (data) => {
-        setMaxWorkers(data.count)
-      }),
     ]
-    return () => unsubs.forEach(fn => fn())
-  }, [ws])
+    return () => {
+      unsubs.forEach(fn => fn())
+      if (flushRafRef.current != null) {
+        cancelAnimationFrame(flushRafRef.current)
+        flushRafRef.current = null
+      }
+    }
+  }, [ws, queueJobPatch])
 
   // Auto-select first running job for log viewing
   useEffect(() => {
@@ -190,9 +274,12 @@ export function App() {
       config: item.config,
       status: 'pending',
       percent: 0,
+      progressMessage: '',
       logs: [],
       result: null,
       errorInfo: null,
+      startedAt: null,
+      endedAt: null,
     }))
 
     setJobs(prev => [...prev, ...newJobs])
@@ -212,8 +299,8 @@ export function App() {
     setJobs(prev => prev.filter(j => j.id !== jobId))
   }, [ws])
 
-  const runQueue = useCallback(() => {
-    ws.send({ type: 'run_queue' })
+  const runQueue = useCallback((opts = {}) => {
+    ws.send({ type: 'run_queue', ...opts })
   }, [ws])
 
   const cancelJob = useCallback((jobId) => {
@@ -248,9 +335,12 @@ export function App() {
       config: old.config,
       status: 'pending',
       percent: 0,
+      progressMessage: '',
       logs: [],
       result: null,
       errorInfo: null,
+      startedAt: null,
+      endedAt: null,
     }
     setJobs(prev => [
       ...prev.map(j => j.id === jobId ? newJob : j),
@@ -259,11 +349,6 @@ export function App() {
       type: 'submit_jobs',
       jobs: [{ id: newId, name: old.name, router: old.router, config: old.config }],
     })
-  }, [ws])
-
-  const changeMaxWorkers = useCallback((n) => {
-    ws.send({ type: 'set_max_workers', count: n })
-    setMaxWorkers(n)
   }, [ws])
 
   const addCurrentConfig = useCallback((autostart = false) => {
@@ -275,14 +360,15 @@ export function App() {
   const resetAll = useCallback(() => {
     clearAll()
     setConfig({ _router: 'Muskingum' })
+    setValidationData({ sourceName: '', parsed: null, error: '' })
     try { localStorage.removeItem('rr_config') } catch {}
     setResetKey(k => k + 1)
     setPage('config')
-  }, [clearAll])
+  }, [clearAll, setValidationData])
 
   const queueCtx = {
     jobs,
-    maxWorkers,
+    queueSettings,
     selectedJobId,
     setSelectedJobId,
     addToQueue,
@@ -294,7 +380,6 @@ export function App() {
     requeueJob,
     clearFinished,
     clearAll,
-    changeMaxWorkers,
   }
 
   const hasRunningJobs = jobs.some(j => j.status === 'running')
@@ -304,50 +389,28 @@ export function App() {
       <ConfigContext.Provider value={{ config, setConfig }}>
         <WorkdirContext.Provider value={{ workdir, setWorkdir }}>
           <QueueContext.Provider value={queueCtx}>
-            <TopBar connected={ws.connected} activePage={page} onNavigate={setPage} resetAll={resetAll} darkMode={darkMode} onToggleDark={() => setDarkMode(d => !d)} hasRunningJobs={hasRunningJobs} />
-            <div style={styles.main}>
-              <div style={styles.left}>
-                {page === 'config' && <ConfigPage onNavigate={setPage} />}
-                {page === 'run' && <QueuePanel />}
-                <div key={`rb-${resetKey}`} style={{ display: page === 'results' ? 'flex' : 'none', flex: 1, overflow: 'hidden', minWidth: 0 }}>
-                  <ResultsBrowser />
+            <ResultsContext.Provider value={{ validationData, setValidationData }}>
+              <TopBar connected={ws.connected} activePage={page} onNavigate={setPage} resetAll={resetAll} darkMode={darkMode} onToggleDark={() => setDarkMode(d => !d)} hasRunningJobs={hasRunningJobs} />
+              <div class="app-main">
+                <div class="app-pane app-pane-left">
+                  {page === 'config' && <ConfigPage onNavigate={setPage} />}
+                  {page === 'run' && <QueuePanel />}
+                  <div key={`rb-${resetKey}`} style={{ display: page === 'results' ? 'flex' : 'none', flex: 1, overflow: 'hidden', minWidth: 0 }}>
+                    <ResultsBrowser />
+                  </div>
+                </div>
+                <div class={`app-pane app-pane-right ${(page === 'config' || page === 'run') ? 'app-pane-code' : ''}`}>
+                  {page === 'config' && <CodePreview />}
+                  {page === 'run' && <JobLogs />}
+                  <div key={`rc-${resetKey}`} style={{ display: page === 'results' ? 'flex' : 'none', flex: 1, overflow: 'hidden', minWidth: 0 }}>
+                    <ResultsChart />
+                  </div>
                 </div>
               </div>
-              <div style={{
-                ...styles.right,
-                background: (page === 'config' || page === 'run') ? 'var(--code-bg)' : undefined,
-              }}>
-                {page === 'config' && <CodePreview />}
-                {page === 'run' && <JobLogs />}
-                <div key={`rc-${resetKey}`} style={{ display: page === 'results' ? 'flex' : 'none', flex: 1, overflow: 'hidden', minWidth: 0 }}>
-                  <ResultsChart />
-                </div>
-              </div>
-            </div>
+            </ResultsContext.Provider>
           </QueueContext.Provider>
         </WorkdirContext.Provider>
       </ConfigContext.Provider>
     </WsContext.Provider>
   )
-}
-
-const styles = {
-  main: {
-    flex: '1',
-    display: 'flex',
-    overflow: 'hidden',
-  },
-  left: {
-    flex: '1',
-    display: 'flex',
-    overflow: 'hidden',
-    minWidth: '0',
-  },
-  right: {
-    flex: '1',
-    display: 'flex',
-    overflow: 'hidden',
-    minWidth: '0',
-    borderLeft: '1px solid var(--border)',
-  },
 }

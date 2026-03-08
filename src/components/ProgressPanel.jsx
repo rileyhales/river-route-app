@@ -107,6 +107,7 @@ const styles = {
   consoleWrapper: {
     flex: 1,
     minHeight: 0,
+    overflow: 'hidden',
     position: 'relative',
     display: 'flex',
     flexDirection: 'column',
