@@ -40,7 +40,7 @@ export function TopBar({ connected, activePage, onNavigate, resetAll, darkMode, 
     <header style={styles.bar}>
       <div style={styles.left}>
         <div style={styles.brandBlock}>
-          <div style={styles.brand}>river-route lab</div>
+          <div style={styles.brand}>river-route app</div>
           {!compact && <div style={styles.subBrand}>routing workstation</div>}
         </div>
 

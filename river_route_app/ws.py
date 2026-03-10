@@ -140,6 +140,20 @@ async def handle_ws_message(websocket: WebSocket, data: dict) -> None:
                 'job_id': data.get('job_id', ''),
             }))
 
+        elif msg_type == 'requeue_job':
+            job = job_manager.requeue_job(data.get('job_id', ''))
+            if job:
+                await job_manager.broadcast({
+                    'type': 'job_requeued',
+                    'job': job.snapshot(),
+                    'job_order': list(job_manager.job_order),
+                })
+            else:
+                await websocket.send_json(_tag({
+                    'type': 'error',
+                    'error': f'Job is not requeueable: {data.get("job_id", "")}',
+                }))
+
         elif msg_type == 'clear_finished':
             job_manager.clear_finished()
             await websocket.send_json(_tag(job_manager.get_snapshot()))
@@ -278,9 +292,11 @@ def _validate_config(config: dict, router_name: str | None = None) -> dict:
     errors = []
     cleaned = _clean_config(config)
     resolved_router = resolve_router_name(router_name)
+    cfg = None
 
     try:
         cfg = Configs(**cleaned)
+        cfg.deep_validate()
         if resolved_router in routers:
             # Router-level checks catch required-key and cross-field logic not covered by Configs.
             router = routers[resolved_router](**cleaned)

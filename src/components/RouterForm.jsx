@@ -1,15 +1,36 @@
 import { useState, useEffect } from 'preact/hooks'
 import { FileBrowser } from './FileBrowser.jsx'
 
-// Field definitions per router type
-const COMMON_FIELDS = [
-  { key: 'params_file', label: 'Parameters File', type: 'file', required: true, hint: 'Parquet file with river_id, downstream_river_id, k, x columns' },
-  { key: 'channel_state_init_file', label: 'Initial Channel State', type: 'file', hint: 'Parquet file with Q column (optional warm start)' },
-  { key: 'channel_state_final_file', label: 'Final Channel State Output', type: 'file', hint: 'Path to write final channel state parquet' },
-]
-
 const DISCHARGE_DIR_FIELD = { key: 'discharge_dir', label: 'Discharge Output Directory', type: 'directory', required: true, hint: 'Directory — file names auto-generated from input files' }
-const DISCHARGE_FILES_FIELD = { key: 'discharge_files', label: 'Discharge Output Files', type: 'multifile', required: true, hint: 'Explicit output netCDF file paths' }
+
+function getCoreFields(router) {
+  const isChannelOnly = router === 'Muskingum'
+  return [
+    { key: 'params_file', label: 'Parameters File', type: 'file', required: true, hint: 'Parquet file with river_id, downstream_river_id, k, x columns' },
+    {
+      key: 'channel_state_init_file',
+      label: 'Initial Channel State',
+      type: 'file',
+      required: isChannelOnly,
+      hint: isChannelOnly
+        ? 'Required parquet file with Q column'
+        : 'Parquet file with Q column (optional warm start)',
+    },
+    { key: 'channel_state_final_file', label: 'Final Channel State Output', type: 'file', hint: 'Path to write final channel state parquet' },
+  ]
+}
+
+function getDischargeFilesField(router) {
+  return {
+    key: 'discharge_files',
+    label: 'Discharge Output Files',
+    type: 'multifile',
+    required: true,
+    hint: router === 'Muskingum'
+      ? 'Exactly one explicit output netCDF path'
+      : 'Explicit output netCDF file paths, one per input file',
+  }
+}
 
 const MUSKINGUM_FIELDS = [
   { key: 'dt_routing', label: 'Routing Timestep (seconds)', type: 'number', required: true },
@@ -18,14 +39,20 @@ const MUSKINGUM_FIELDS = [
   { key: 'start_datetime', label: 'Start Date', type: 'text', hint: 'ISO format, e.g. 2000-01-01' },
 ]
 
-const LATERAL_MODE_FIELDS = {
-  catchment: [
-    { key: 'qlateral_files', label: 'Lateral Inflow Files', type: 'multifile', required: true, hint: 'netCDF files with per-catchment lateral inflow (qlateral)' },
-  ],
-  grid: [
-    { key: 'grid_runoff_files', label: 'Runoff Grid Files', type: 'multifile', required: true, hint: 'netCDF gridded runoff depth files' },
-    { key: 'grid_weights_file', label: 'Grid Weights File', type: 'file', required: true, hint: 'netCDF weight table mapping grid to catchments' },
-  ],
+function getLateralModeFields(router) {
+  const qlateralHint = router === 'UnitMuskingum'
+    ? 'netCDF files with per-catchment runoff depths; variable qlateral'
+    : 'netCDF files with per-catchment runoff volumes; variable qlateral'
+
+  return {
+    catchment: [
+      { key: 'qlateral_files', label: 'Lateral Inflow Files', type: 'multifile', required: true, hint: qlateralHint },
+    ],
+    grid: [
+      { key: 'grid_runoff_files', label: 'Runoff Grid Files', type: 'multifile', required: true, hint: 'netCDF gridded runoff depth files' },
+      { key: 'grid_weights_file', label: 'Grid Weights File', type: 'file', required: true, hint: 'netCDF weights dataset with river_id, x_index, y_index, area_sqm, and proportion' },
+    ],
+  }
 }
 
 const TRANSFORM_TIME_FIELDS = [
@@ -33,6 +60,7 @@ const TRANSFORM_TIME_FIELDS = [
   { key: 'dt_runoff', label: 'Runoff Timestep (seconds)', type: 'number', hint: 'Auto-detected from input files' },
   { key: 'dt_discharge', label: 'Output Timestep (seconds)', type: 'number', hint: 'Defaults to dt_runoff' },
   { key: 'dt_total', label: 'Total Duration (seconds)', type: 'number', hint: 'Auto-computed from input files' },
+  { key: 'start_datetime', label: 'Start Date', type: 'text', hint: 'ISO format, e.g. 2000-01-01' },
 ]
 
 const PROCESSING_FIELDS = [
@@ -77,8 +105,8 @@ export const VALID_KEYS = {
     'dt_routing', 'dt_total', 'dt_discharge', 'start_datetime',
     // runtime
     'log', 'progress_bar', 'log_level', 'log_stream', 'log_format',
-    // variable names (only universal ones — no lateral inflow vars)
-    'var_river_id', 'var_discharge',
+    // variable names
+    'var_river_id', 'var_discharge', 'var_t',
   ]),
   RapidMuskingum: new Set([
     '_router',
@@ -87,8 +115,8 @@ export const VALID_KEYS = {
     'discharge_dir', 'discharge_files',
     // input data
     'qlateral_files', 'grid_runoff_files', 'grid_weights_file',
-    // time (all optional for Rapid — NO start_datetime per docs)
-    'dt_routing', 'dt_runoff', 'dt_discharge', 'dt_total',
+    // time
+    'dt_routing', 'dt_runoff', 'dt_discharge', 'dt_total', 'start_datetime',
     // processing
     'runoff_processing_mode', 'grid_accumulation_type',
     // runtime
@@ -106,8 +134,8 @@ export const VALID_KEYS = {
     'qlateral_files', 'grid_runoff_files', 'grid_weights_file',
     // unit hydrograph
     'uh_kernel_file', 'uh_state_init_file', 'uh_state_final_file',
-    // time (all optional — NO start_datetime per docs)
-    'dt_routing', 'dt_runoff', 'dt_discharge', 'dt_total',
+    // time
+    'dt_routing', 'dt_runoff', 'dt_discharge', 'dt_total', 'start_datetime',
     // processing
     'runoff_processing_mode', 'grid_accumulation_type',
     // runtime
@@ -307,6 +335,9 @@ export function RouterForm({ router, config, onChange }) {
   const [advancedOpen, setAdvancedOpen] = useState(false)
   const validKeys = VALID_KEYS[router] || VALID_KEYS.Muskingum
   const filteredAdvanced = ADVANCED_FIELDS.filter(f => validKeys.has(f.key))
+  const coreFields = getCoreFields(router)
+  const dischargeFilesField = getDischargeFilesField(router)
+  const lateralModeFields = getLateralModeFields(router)
 
   // Sync mode into config on first render if not set
   useEffect(() => {
@@ -330,7 +361,7 @@ export function RouterForm({ router, config, onChange }) {
 
   return (
     <div>
-      <FieldGroup title="Core Files" fields={COMMON_FIELDS} config={config} onChange={onChange} />
+      <FieldGroup title="Core Files" fields={coreFields} config={config} onChange={onChange} />
 
       <div class="section">
         <div class="section-title">Discharge Output</div>
@@ -354,7 +385,7 @@ export function RouterForm({ router, config, onChange }) {
         {dischargeMode === 'directory' ? (
           <FormField field={DISCHARGE_DIR_FIELD} value={config.discharge_dir} onChange={onChange} />
         ) : (
-          <FormField field={DISCHARGE_FILES_FIELD} value={config.discharge_files} onChange={onChange} />
+          <FormField field={dischargeFilesField} value={config.discharge_files} onChange={onChange} />
         )}
       </div>
 
@@ -383,7 +414,7 @@ export function RouterForm({ router, config, onChange }) {
                 </button>
               </div>
             </div>
-            {LATERAL_MODE_FIELDS[lateralMode].map(field => (
+            {lateralModeFields[lateralMode].map(field => (
               <FormField key={field.key} field={field} value={config[field.key]} onChange={onChange} />
             ))}
           </div>

@@ -1,3 +1,4 @@
+import argparse
 import logging
 import os
 
@@ -48,7 +49,15 @@ def _build_routes():
 app = Starlette(routes=_build_routes())
 
 
-def main():
-    """CLI entry point: ``river-route-app``."""
+def main(argv: list[str] | None = None):
+    """CLI entry point: ``rrlabs``."""
+    parser = argparse.ArgumentParser(
+        prog='rrlabs',
+        description='Launch the river-route app server.',
+    )
+    parser.add_argument('--host', default='127.0.0.1', help='Host interface to bind to.')
+    parser.add_argument('--port', type=int, default=8000, help='Port to listen on.')
+    args = parser.parse_args(argv)
+
     import uvicorn
-    uvicorn.run('river_route_app.server:app', host='127.0.0.1', port=8000)
+    uvicorn.run('river_route_app.server:app', host=args.host, port=args.port)

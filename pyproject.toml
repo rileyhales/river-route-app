@@ -21,7 +21,7 @@ dependencies = [
 ]
 
 [project.scripts]
-river-route-app = "river_route_app.server:main"
+rrlabs = "river_route_app.server:main"
 
 [tool.setuptools.packages.find]
 include = ["river_route_app*"]

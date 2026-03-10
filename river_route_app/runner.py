@@ -176,6 +176,18 @@ class Job:
         if self._cancelled is not None:
             self._cancelled.set()
 
+    def reset_for_requeue(self):
+        self.status = 'pending'
+        self.percent = 0
+        self.progress_message = ''
+        self.logs = []
+        self.result = None
+        self.error_info = None
+        self.started_at = None
+        self.ended_at = None
+        self._cancel_requested = False
+        self._completion_grace_until = None
+
     def add_log(self, level: str, message: str):
         self.logs.append({'level': level, 'message': message})
         if len(self.logs) > self.MAX_LOGS:
@@ -274,6 +286,16 @@ class JobManager:
             self._finalize_worker(job)
         self.jobs.clear()
         self.job_order.clear()
+
+    def requeue_job(self, job_id: str) -> Job | None:
+        job = self.jobs.get(job_id)
+        if not job or job.status not in ('complete', 'error', 'cancelled'):
+            return None
+        self._finalize_worker(job)
+        job.reset_for_requeue()
+        self.job_order = [jid for jid in self.job_order if jid != job_id]
+        self.job_order.append(job_id)
+        return job
 
     def get_snapshot(self) -> dict:
         return {
@@ -576,6 +598,9 @@ class JobManager:
             except Exception:
                 dead.add(ws)
         self.subscribers -= dead
+
+    async def broadcast(self, message: dict):
+        await self._broadcast(message)
 
 
 job_manager = JobManager()

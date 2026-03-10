@@ -37,6 +37,45 @@ export function prepareJobConfig(rawConfig) {
   return { router, config }
 }
 
+function restoreJobSnapshot(snapshot, nowMs = Date.now()) {
+  const startedAt = typeof snapshot.started_at === 'number' ? snapshot.started_at * 1000 : null
+  const endedAt = typeof snapshot.ended_at === 'number'
+    ? snapshot.ended_at * 1000
+    : (startedAt != null && (snapshot.status === 'complete' || snapshot.status === 'error' || snapshot.status === 'cancelled')
+        ? nowMs
+        : null)
+
+  return {
+    id: snapshot.id,
+    name: snapshot.name,
+    router: snapshot.router,
+    status: snapshot.status,
+    percent: snapshot.percent || 0,
+    progressMessage: snapshot.progress_message || '',
+    logs: [],
+    result: snapshot.result || null,
+    errorInfo: snapshot.error_info || null,
+    startedAt,
+    endedAt,
+  }
+}
+
+function orderJobs(jobs, jobOrder) {
+  if (!Array.isArray(jobOrder) || jobOrder.length === 0) return jobs
+
+  const byId = new Map(jobs.map(job => [job.id, job]))
+  const ordered = []
+
+  jobOrder.forEach((jobId) => {
+    const job = byId.get(jobId)
+    if (!job) return
+    ordered.push(job)
+    byId.delete(jobId)
+  })
+
+  return [...ordered, ...byId.values()]
+}
+
 export function App() {
   const ws = useWebSocket()
   const [darkMode, setDarkMode] = useState(() => {
@@ -102,10 +141,8 @@ export function App() {
   const [queueSettings, setQueueSettings] = useState({
     maxConcurrency: 1,
   })
-  const jobsRef = useRef([])
   const batchedJobUpdatesRef = useRef(new Map())
   const flushRafRef = useRef(null)
-  useEffect(() => { jobsRef.current = jobs }, [jobs])
 
   const flushBatchedUpdates = useCallback(() => {
     flushRafRef.current = null
@@ -152,27 +189,7 @@ export function App() {
       // Full snapshot on reconnect
       ws.on('queue_status', (data) => {
         const nowMs = Date.now()
-        const restored = (data.jobs || []).map((j) => {
-          const startedAt = typeof j.started_at === 'number' ? j.started_at * 1000 : null
-          const endedAt = typeof j.ended_at === 'number'
-            ? j.ended_at * 1000
-            : (startedAt != null && (j.status === 'complete' || j.status === 'error' || j.status === 'cancelled')
-                ? nowMs
-                : null)
-          return {
-            id: j.id,
-            name: j.name,
-            router: j.router,
-            status: j.status,
-            percent: j.percent || 0,
-            progressMessage: j.progress_message || '',
-            logs: [],
-            result: j.result || null,
-            errorInfo: j.error_info || null,
-            startedAt,
-            endedAt,
-          }
-        })
+        const restored = (data.jobs || []).map(j => restoreJobSnapshot(j, nowMs))
         setJobs(restored)
         setQueueSettings({
           maxConcurrency: data.max_concurrency || 1,
@@ -239,6 +256,14 @@ export function App() {
       }),
       ws.on('job_removed', (data) => {
         setJobs(prev => prev.filter(j => j.id !== data.job_id))
+      }),
+      ws.on('job_requeued', (data) => {
+        if (!data.job) return
+        const restored = restoreJobSnapshot(data.job)
+        setJobs(prev => orderJobs(
+          [...prev.filter(j => j.id !== restored.id), restored],
+          data.job_order,
+        ))
       }),
       ws.on('queue_idle', () => {
         // All jobs done — could auto-navigate
@@ -323,32 +348,7 @@ export function App() {
   }, [ws])
 
   const requeueJob = useCallback((jobId) => {
-    const old = jobsRef.current.find(j => j.id === jobId)
-    if (!old) return
-    // Remove old, submit fresh copy
-    ws.send({ type: 'remove_job', job_id: jobId })
-    const newId = crypto.randomUUID()
-    const newJob = {
-      id: newId,
-      name: old.name,
-      router: old.router,
-      config: old.config,
-      status: 'pending',
-      percent: 0,
-      progressMessage: '',
-      logs: [],
-      result: null,
-      errorInfo: null,
-      startedAt: null,
-      endedAt: null,
-    }
-    setJobs(prev => [
-      ...prev.map(j => j.id === jobId ? newJob : j),
-    ])
-    ws.send({
-      type: 'submit_jobs',
-      jobs: [{ id: newId, name: old.name, router: old.router, config: old.config }],
-    })
+    ws.send({ type: 'requeue_job', job_id: jobId })
   }, [ws])
 
   const addCurrentConfig = useCallback((autostart = false) => {

@@ -47,13 +47,41 @@ function StatusBadge({ status }) {
   )
 }
 
-function JobRow({ job, isSelected, onSelect, onRemove, onCancel, onRequeue }) {
+function JobContextMenu({ x, y, onClose, onRequeue }) {
+  const clampedX = typeof window === 'undefined' ? x : Math.min(x, window.innerWidth - 200)
+  const clampedY = typeof window === 'undefined' ? y : Math.min(y, window.innerHeight - 56)
+
+  return (
+    <div
+      style={{
+        ...styles.contextMenu,
+        left: Math.max(8, clampedX),
+        top: Math.max(8, clampedY),
+      }}
+      onPointerDown={(e) => e.stopPropagation()}
+      onClick={(e) => e.stopPropagation()}
+    >
+      <button
+        style={styles.contextMenuItem}
+        onClick={() => {
+          onRequeue()
+          onClose()
+        }}
+      >
+        Mark for requeue
+      </button>
+    </div>
+  )
+}
+
+function JobRow({ job, isSelected, onSelect, onRemove, onCancel, onRequeue, onContextMenu }) {
   const isActive = job.status === 'running'
   const isTerminal = job.status === 'complete' || job.status === 'error' || job.status === 'cancelled'
 
   return (
     <div
       onClick={() => onSelect(job.id)}
+      onContextMenu={(e) => onContextMenu(e, job)}
       style={{
         display: 'flex',
         alignItems: 'center',
@@ -211,11 +239,30 @@ export function QueuePanel() {
   const fileInputRef = useRef(null)
   const [dragOver, setDragOver] = useState(false)
   const [maxConcurrency, setMaxConcurrency] = useState(1)
+  const [contextMenu, setContextMenu] = useState(null)
 
   useEffect(() => {
     const max = Number(q.queueSettings?.maxConcurrency || 1)
     setMaxConcurrency(max > 0 ? max : 1)
   }, [q.queueSettings?.maxConcurrency])
+
+  useEffect(() => {
+    if (!contextMenu) return
+
+    const closeMenu = () => setContextMenu(null)
+    const handleKeyDown = (e) => {
+      if (e.key === 'Escape') closeMenu()
+    }
+
+    window.addEventListener('pointerdown', closeMenu)
+    window.addEventListener('keydown', handleKeyDown)
+    window.addEventListener('resize', closeMenu)
+    return () => {
+      window.removeEventListener('pointerdown', closeMenu)
+      window.removeEventListener('keydown', handleKeyDown)
+      window.removeEventListener('resize', closeMenu)
+    }
+  }, [contextMenu])
 
   const hasJobs = q.jobs.length > 0
   const hasPending = q.jobs.some(j => j.status === 'pending')
@@ -310,6 +357,18 @@ export function QueuePanel() {
         max_concurrency: Math.max(1, Number(maxConcurrency) || 1),
       })
     }
+  }
+
+  const handleJobContextMenu = (e, job) => {
+    if (job.status !== 'complete') return
+    e.preventDefault()
+    e.stopPropagation()
+    q.setSelectedJobId(job.id)
+    setContextMenu({
+      jobId: job.id,
+      x: e.clientX,
+      y: e.clientY,
+    })
   }
 
   return (
@@ -423,9 +482,19 @@ export function QueuePanel() {
             onRemove={q.removeFromQueue}
             onCancel={q.cancelJob}
             onRequeue={q.requeueJob}
+            onContextMenu={handleJobContextMenu}
           />
         ))}
       </div>
+
+      {contextMenu && (
+        <JobContextMenu
+          x={contextMenu.x}
+          y={contextMenu.y}
+          onClose={() => setContextMenu(null)}
+          onRequeue={() => q.requeueJob(contextMenu.jobId)}
+        />
+      )}
     </div>
   )
 }
@@ -600,6 +669,28 @@ const styles = {
     borderRadius: '4px',
     opacity: 0.7,
     flexShrink: 0,
+  },
+  contextMenu: {
+    position: 'fixed',
+    zIndex: 20,
+    minWidth: '180px',
+    padding: '6px',
+    borderRadius: '8px',
+    border: '1px solid var(--border)',
+    background: 'var(--bg-elevated)',
+    boxShadow: '0 16px 40px rgba(15, 23, 42, 0.28)',
+  },
+  contextMenuItem: {
+    width: '100%',
+    padding: '10px 12px',
+    border: 'none',
+    borderRadius: '6px',
+    background: 'transparent',
+    color: 'var(--text-primary)',
+    textAlign: 'left',
+    cursor: 'pointer',
+    fontSize: '13px',
+    fontFamily: 'inherit',
   },
   errorBlock: {
     background: 'rgba(251, 113, 133, 0.1)',

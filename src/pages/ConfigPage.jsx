@@ -1,5 +1,5 @@
 import { useState, useContext, useCallback } from 'preact/hooks'
-import { WsContext, ConfigContext, QueueContext } from '../app.jsx'
+import { WsContext, ConfigContext, QueueContext, prepareJobConfig } from '../app.jsx'
 import { RouterForm, VALID_KEYS } from '../components/RouterForm.jsx'
 import { normalizeLoadedConfig } from '../utils/configSchema.js'
 
@@ -57,10 +57,8 @@ export function ConfigPage({ onNavigate }) {
   }, [ws, config])
 
   const saveConfig = useCallback(() => {
-    const out = {}
-    for (const [k, v] of Object.entries(config)) {
-      if (!k.startsWith('_')) out[k] = v
-    }
+    const prepared = prepareJobConfig(config)
+    const out = { _router: prepared.router, ...prepared.config }
     const blob = new Blob([JSON.stringify(out, null, 2)], { type: 'application/json' })
     const url = URL.createObjectURL(blob)
     const a = document.createElement('a')
